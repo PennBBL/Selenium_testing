@@ -1,10 +1,25 @@
 # Selenium Battery Framework - First Pass
 
-This is a first-pass integration scaffold for a 3-test battery:
+## Initial setup
 
-- ER40: `k-er40-d-4.60-ff`
-- CPW: `k-cpw-3.01-ff`
-- VSPLOT: `zn_CN-vsplot24-2.10-ff`
+Clone repository.
+
+### Setup virtual environment
+% python3 -m venv .venv
+
+% source .venv/bin/activate
+
+### Install requirements:
+pip install -r requirements.txt
+
+# Auth
+Contains the login function.
+
+# Add account info
+In the cnb_selenium_testing folder create a .env file with the following content:
+ - adminid=your_cnb_admin_id
+ - pwd=your_cnb_password
+
 
 It is designed for:
 
