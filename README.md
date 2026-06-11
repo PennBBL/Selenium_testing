@@ -18,7 +18,6 @@ It is designed for:
 
 ## Important setup step
 
-Replace `core/assessment_link.py` with your existing `core/assessment_link.py` implementation. The included file is a placeholder because the original function was imported by your existing scripts but not uploaded here.
 
 You also need your existing `auth/login.py` module available for scraping, because the scraper imports:
 
