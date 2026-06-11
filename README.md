@@ -73,15 +73,4 @@ CSV files are currently written in the working directory as:
 - `cpw_results.csv`
 - `vsplot_results.csv`
 
-## Expected first adjustments
 
-The framework assumes the runner clicks the exact-code landing page before calling each plugin. If one plugin starts one page too early/late, adjust the number of continue clicks inside that plugin.
-
-The most likely first adjustment is in `tests_catalog/vsplot_plugin.py`:
-
-```python
-for i in range(3):
-    self._click_continue(ctx, f'instruction {i + 1}/3')
-```
-
-Your standalone VSPLOT clicked 4 instruction continues. This framework clicks the landing page first, so the plugin currently clicks 3.
