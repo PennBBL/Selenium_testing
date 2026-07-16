@@ -48,9 +48,66 @@ RESULTS_CONFIGS = {
             "ADT36A_CR",
             "ADT36A_PC",
             "ADT36A_RTCR",
-            "ADT36A_ER"
+            "ADT36A_ER",
 
             # add ADT score names here
+        ],
+    ),
+    "mpraxis-2.06-ff": ResultsConfig(
+        test_name="mpraxis-2.06-ff",
+        csv_file="mpraxis_results.csv",
+        target_scores=[
+            "ScorVers",
+            # add Motor Praxis score names here once confirmed
+        ],
+    ),
+    "svoltd-3.00-ff": ResultsConfig(
+        test_name="svoltd-3.00-ff",
+        csv_file="svoltd_results.csv",
+        target_scores=[
+            "ScorVers",
+            # add SVOLTD score names once confirmed
+        ],
+    ),
+    "cpf-2.05-ff": ResultsConfig(
+        test_name="cpf-2.05-ff",
+        csv_file="cpf_results.csv",
+        target_scores=[
+            "ScorVers",
+            # add CPF score names once confirmed
+        ],
+    ),
+
+    "cpfd-2.05-ff": ResultsConfig(
+        test_name="cpfd-2.05-ff",
+        csv_file="cpfd_results.csv",
+        target_scores=[
+            "ScorVers",
+            # add CPFD score names once confirmed
+        ],
+    ),
+    "pmat24-a-2.00-ff": ResultsConfig(
+        test_name="pmat24-a-2.00-ff",
+        csv_file="pmat_results.csv",
+        target_scores=[
+            "ScorVers",
+            # add PMAT score names once confirmed
+        ],
+    ),
+    "k-pcet-3.00-ff": ResultsConfig(
+        test_name="k-pcet-3.00-ff",
+        csv_file="pcet_results.csv",
+        target_scores=[
+            "ScorVers",
+            # add PCET score names once confirmed
+        ],
+    ),
+    "spcptnl-2.01-ff": ResultsConfig(
+        test_name="spcptnl-2.01-ff",
+        csv_file="spcptnl_results.csv",
+        target_scores=[
+            "ScorVers",
+            # add SPCPTNL score names once confirmed
         ],
     ),
 }
