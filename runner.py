@@ -24,7 +24,7 @@ def prompt_required(label: str) -> str:
 
 def main():
     print('=' * 70)
-    print('PENN CNP 3-TEST BATTERY RUNNER')
+    print('PENN CNB BATTERY RUNNER')
     print('Chrome only, visible mode, default/correct strategies')
     print('=' * 70)
 

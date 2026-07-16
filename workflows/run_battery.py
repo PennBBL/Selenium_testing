@@ -6,14 +6,16 @@ Behavior:
 - Dispatches to the correct plugin based on exact test code.
 - If the test is unknown, logs it as FAIL, saves artifacts, presses Ctrl + .,
   and continues the battery if possible.
-- After a known test completes, does NOT wait 60 seconds for a battery choice page.
-  Instead, it briefly checks for:
+- If a known plugin fails or raises an exception, logs it as FAIL, saves artifacts,
+  presses Ctrl + ., and continues the battery if possible.
+- After a known test completes successfully, briefly checks for:
     1. inter-test go.png link
     2. direct next p.test-name landing page
     3. otherwise treats the battery as complete
 - When the battery is complete, waits 5 seconds before returning to runner.
 """
 
+import re
 import time
 from typing import Any
 
@@ -23,16 +25,26 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 
 from pages.test_landing_page import TestLandingPage
+from tests_catalog.common import TestRunResult
 from tests_catalog.registry import TEST_REGISTRY, DEFAULT_STRATEGIES
 
 
-UNKNOWN_TEST_STATUS = "FAIL"
+FAIL_STATUS = "FAIL"
+
 UNKNOWN_TEST_ERROR = "Unknown test code; skipped with Ctrl+."
+PLUGIN_FAIL_SKIP_ERROR = "Known plugin failed; skipped with Ctrl+."
+PLUGIN_EXCEPTION_SKIP_ERROR = "Known plugin raised exception; skipped with Ctrl+."
 
 GO_LINK = (By.XPATH, "//a[.//img[contains(@src, 'go.png')]]")
 QUIT_LINK = (By.XPATH, "//a[contains(@href, 'op=Quit') or .//img[contains(@src, 'stop.png')]]")
 NEXT_TEST_TEXT = (By.XPATH, "//p[contains(normalize-space(.), 'Next test:')]")
 TEST_NAME = (By.CSS_SELECTOR, "p.test-name")
+
+
+def _safe_artifact_name(value: str) -> str:
+    value = value or "unknown"
+    value = re.sub(r"[^A-Za-z0-9_.-]+", "_", value)
+    return value.strip("_") or "unknown"
 
 
 def _safe_find(ctx, locator):
@@ -62,6 +74,7 @@ def _click_go(ctx) -> None:
     els = _safe_find(ctx, GO_LINK)
     if not els:
         raise TimeoutException("Could not find battery go.png link.")
+
     ctx.driver.execute_script("arguments[0].click();", els[0])
     time.sleep(2)
 
@@ -70,31 +83,59 @@ def _get_next_test_label(ctx) -> str | None:
     els = _safe_find(ctx, NEXT_TEST_TEXT)
     if not els:
         return None
+
     text = els[0].text.strip()
     if "Next test:" in text:
         return text.split("Next test:", 1)[1].strip()
+
     return text
 
 
 def _send_ctrl_period(ctx) -> None:
     """Send the platform shortcut for skipping a test: Ctrl + ."""
     ctx.logger.info("Sending skip shortcut: Ctrl + .")
-    ActionChains(ctx.driver).key_down(Keys.CONTROL).send_keys(".").key_up(Keys.CONTROL).perform()
+
+    try:
+        ActionChains(ctx.driver).key_down(Keys.CONTROL).send_keys(".").key_up(Keys.CONTROL).perform()
+    except Exception:
+        ctx.logger.exception("ActionChains Ctrl+. failed; trying body fallback")
+
+        try:
+            body = ctx.driver.find_element(By.TAG_NAME, "body")
+            body.send_keys(Keys.CONTROL, ".")
+        except Exception:
+            ctx.logger.exception("Body Ctrl+. fallback failed")
+            raise
+
     time.sleep(1)
 
 
-def _record_failed_test(ctx, exact_code: str, errors: list[str]) -> dict[str, Any]:
-    """Record an unknown skipped test as failed, but do not scrape it."""
+def _capture_failure_artifact(ctx, name: str, payload: dict[str, Any]) -> None:
+    try:
+        ctx.artifacts.capture_failure(ctx.driver, _safe_artifact_name(name), payload)
+    except Exception as exc:
+        ctx.logger.warning(f"Could not capture failure artifact {name}: {exc}")
+
+
+def _record_failed_test(
+    ctx,
+    exact_code: str,
+    errors: list[str],
+    skipped: bool = True,
+    scrape: bool = False,
+) -> dict[str, Any]:
+    """Record a failed/skipped test and do not scrape it by default."""
     record = {
         "test_name": exact_code,
-        "status": UNKNOWN_TEST_STATUS,
+        "status": FAIL_STATUS,
         "errors": errors,
-        "skipped": True,
-        "skip_method": "ctrl_period",
-        "scrape": False,
+        "skipped": skipped,
+        "skip_method": "ctrl_period" if skipped else None,
+        "scrape": scrape,
     }
+
     ctx.completed_tests.append(record)
-    ctx.registry.mark_test_completed(ctx.subid, exact_code, UNKNOWN_TEST_STATUS, errors)
+    ctx.registry.mark_test_completed(ctx.subid, exact_code, FAIL_STATUS, errors)
     return record
 
 
@@ -108,6 +149,7 @@ def _record_completed_test(ctx, exact_code: str, result) -> dict[str, Any]:
         "skip_method": None,
         "scrape": True,
     }
+
     ctx.completed_tests.append(record)
     ctx.registry.mark_test_completed(ctx.subid, exact_code, result.status, result.errors)
     return record
@@ -130,8 +172,6 @@ def _wait_for_landing_or_go_or_final(ctx, timeout: int = 8) -> str:
         if _page_has_test_landing(ctx):
             return "landing"
 
-        # The final page may have no go/quit/buttons. Do not immediately call it final;
-        # give the platform a few seconds to finish navigation.
         time.sleep(0.5)
 
     return "final"
@@ -147,7 +187,7 @@ def _finish_battery(ctx) -> None:
 
 def _advance_after_test(ctx) -> bool:
     """
-    Called after a known test completes or after an unknown test is skipped.
+    Called after a known test completes or after a test is skipped.
 
     Returns True if the battery should continue.
     Returns False if the battery is complete.
@@ -183,21 +223,73 @@ def _skip_unknown_test(ctx, exact_code: str) -> dict[str, Any]:
     """
     ctx.logger.error(f"Unknown test encountered: {exact_code}")
 
-    try:
-        ctx.artifacts.capture_failure(
-            ctx.driver,
-            f"unknown_test_{exact_code}",
-            {
-                "exact_code": exact_code,
-                "action": "mark_failed_and_skip_with_ctrl_period",
-            },
-        )
-    except Exception as exc:
-        ctx.logger.warning(f"Could not capture unknown-test artifacts: {exc}")
+    _capture_failure_artifact(
+        ctx,
+        f"unknown_test_{exact_code}",
+        {
+            "exact_code": exact_code,
+            "action": "mark_failed_and_skip_with_ctrl_period",
+        },
+    )
 
-    record = _record_failed_test(ctx, exact_code, [UNKNOWN_TEST_ERROR])
+    record = _record_failed_test(ctx, exact_code, [UNKNOWN_TEST_ERROR], skipped=True, scrape=False)
     _send_ctrl_period(ctx)
     return record
+
+
+def _skip_failed_known_test(ctx, exact_code: str, result) -> None:
+    """
+    Known test failure behavior:
+    - Plugin already returned FAIL.
+    - Capture artifacts.
+    - Press Ctrl + . to skip current test state.
+    """
+    ctx.logger.error(f"Known test failed: {exact_code}; skipping with Ctrl+.")
+
+    _capture_failure_artifact(
+        ctx,
+        f"failed_test_{exact_code}",
+        {
+            "exact_code": exact_code,
+            "status": getattr(result, "status", FAIL_STATUS),
+            "errors": getattr(result, "errors", []),
+            "action": "skip_failed_known_test_with_ctrl_period",
+        },
+    )
+
+    _send_ctrl_period(ctx)
+
+
+def _run_plugin_safely(ctx, exact_code: str, plugin, strategy: str):
+    """
+    Run a plugin and convert unhandled exceptions into TestRunResult FAIL.
+
+    This prevents a plugin exception from stopping the battery loop.
+    """
+    try:
+        return plugin.run(ctx, strategy=strategy)
+
+    except Exception as exc:
+        ctx.logger.exception(f"{exact_code} plugin raised unhandled exception")
+
+        _capture_failure_artifact(
+            ctx,
+            f"plugin_exception_{exact_code}",
+            {
+                "exact_code": exact_code,
+                "error": str(exc),
+                "action": "convert_exception_to_fail_and_skip",
+            },
+        )
+
+        return TestRunResult(
+            status=FAIL_STATUS,
+            errors=[f"{PLUGIN_EXCEPTION_SKIP_ERROR} {exc}"],
+        )
+
+
+def _result_failed(result) -> bool:
+    return getattr(result, "status", None) != "PASS"
 
 
 def run_battery(ctx, registry=None):
@@ -207,6 +299,9 @@ def run_battery(ctx, registry=None):
     The exact p.test-name on each landing page determines which plugin is used.
     Unknown tests are marked FAIL, skipped with Ctrl+., and the battery continues
     when possible.
+
+    Known tests that return FAIL or raise exceptions are also marked FAIL, skipped
+    with Ctrl+., and the battery continues when possible.
     """
     registry = registry or TEST_REGISTRY
     completed = []
@@ -223,16 +318,80 @@ def run_battery(ctx, registry=None):
 
             if _advance_after_test(ctx):
                 continue
+
             break
 
         plugin_cls = registry[exact_code]
-        strategy = DEFAULT_STRATEGIES[exact_code]
+        strategy = DEFAULT_STRATEGIES.get(exact_code, "random")
         plugin = plugin_cls()
 
         ctx.logger.info(f"Starting {exact_code} with strategy={strategy}")
-        landing.click_continue()
 
-        result = plugin.run(ctx, strategy=strategy)
+        try:
+            landing.click_continue()
+        except Exception as exc:
+            ctx.logger.exception(f"{exact_code}: failed to click landing continue")
+
+            result = TestRunResult(
+                status=FAIL_STATUS,
+                errors=[f"Failed to click landing continue: {exc}"],
+            )
+
+            record = _record_failed_test(
+                ctx,
+                exact_code,
+                result.errors,
+                skipped=True,
+                scrape=False,
+            )
+            completed.append(record)
+
+            _capture_failure_artifact(
+                ctx,
+                f"landing_continue_failure_{exact_code}",
+                {
+                    "exact_code": exact_code,
+                    "errors": result.errors,
+                    "action": "skip_after_landing_continue_failure",
+                },
+            )
+
+            _send_ctrl_period(ctx)
+
+            if _advance_after_test(ctx):
+                continue
+
+            break
+
+        result = _run_plugin_safely(ctx, exact_code, plugin, strategy)
+
+        if result.errors:
+            ctx.logger.error(f"{exact_code} errors: {result.errors}")
+
+        if _result_failed(result):
+            errors = list(result.errors or [])
+            if PLUGIN_FAIL_SKIP_ERROR not in " ".join(errors):
+                errors.append(PLUGIN_FAIL_SKIP_ERROR)
+
+            failed_result = TestRunResult(status=FAIL_STATUS, errors=errors)
+
+            record = _record_failed_test(
+                ctx,
+                exact_code,
+                failed_result.errors,
+                skipped=True,
+                scrape=False,
+            )
+            completed.append(record)
+
+            ctx.logger.info(f"Completed {exact_code}: {failed_result.status}")
+            _skip_failed_known_test(ctx, exact_code, failed_result)
+
+            if _advance_after_test(ctx):
+                continue
+
+            break
+
         record = _record_completed_test(ctx, exact_code, result)
         completed.append(record)
 
@@ -240,6 +399,7 @@ def run_battery(ctx, registry=None):
 
         if _advance_after_test(ctx):
             continue
+
         break
 
     return completed
