@@ -37,6 +37,11 @@ RESULTS_CONFIGS = {
         csv_file="medf_results.csv",
         target_scores=[
             "ScorVers",
+            "MEDF36A_CR",
+            "MEDF36A_PC",
+            "MEDF36A_RTCR",
+            "MEDF36A_ER"
+
             # add MEDF score names here
         ],
     ),
@@ -58,6 +63,10 @@ RESULTS_CONFIGS = {
         csv_file="mpraxis_results.csv",
         target_scores=[
             "ScorVers",
+            "MP1RT",
+            "MP2",
+            "MP2RTCR",
+            "MP_EFF",
             # add Motor Praxis score names here once confirmed
         ],
     ),
@@ -114,3 +123,47 @@ RESULTS_CONFIGS = {
 
 # Alias: some batteries expose VSPLOT without the language prefix.
 RESULTS_CONFIGS['vsplot24-2.10-ff'] = RESULTS_CONFIGS['zn_CN-vsplot24-2.10-ff']
+
+
+
+def _add_alias(alias_code: str, base_code: str):
+    """
+    Add a RESULTS_CONFIGS alias while preserving the actual test code
+    that appeared in the battery result.
+
+    This avoids KeyError in the scraper and keeps the CSV test_name accurate.
+    """
+    base = RESULTS_CONFIGS[base_code]
+
+    RESULTS_CONFIGS[alias_code] = ResultsConfig(
+        test_name=alias_code,
+        csv_file=base.csv_file,
+        target_scores=base.target_scores,
+    )
+
+
+# CPW aliases
+_add_alias("zn_CN-k-cpw-3.01-ff", "k-cpw-3.01-ff")
+_add_alias("zh_CN-k-cpw-3.01-ff", "k-cpw-3.01-ff")
+
+# VSPLOT aliases
+_add_alias("vsplot24-2.10-ff", "zn_CN-vsplot24-2.10-ff")
+
+# MPraxis aliases
+_add_alias("zn_CN-mpraxis-2.06-ff", "mpraxis-2.06-ff")
+_add_alias("kr_KR-mpraxis-2.06-ff", "mpraxis-2.06-ff")
+
+# CPF aliases
+_add_alias("zn_CN-cpf-2.05-ff", "cpf-2.05-ff")
+
+# PMAT aliases
+_add_alias("zn_CN-pmat24-a-2.00-ff", "pmat24-a-2.00-ff")
+_add_alias("zh_CN-pmat24-a-2.00-ff", "pmat24-a-2.00-ff")
+
+# PCET aliases
+_add_alias("zn_CN-k-pcet-3.00-ff", "k-pcet-3.00-ff")
+_add_alias("zh_CN-k-pcet-3.00-ff", "k-pcet-3.00-ff")
+
+# SPCPTNL aliases
+_add_alias("zn_CN-spcptnl-2.01-ff", "spcptnl-2.01-ff")
+_add_alias("zh_CN-spcptnl-2.01-ff", "spcptnl-2.01-ff")

@@ -404,7 +404,16 @@ def run_configured_battery_scraper(
 
         for record in test_results:
             test_name = record["test_name"]
-            config = configs[test_name]
+            config = configs.get(test_name)
+
+            if not config:
+                scraped.append({
+                    "test_name": test_name,
+                    "status": status,
+                    "scrape_status": "NO_RESULTS_CONFIG",
+                    "scores": {},
+                })
+                continue
             status = str(record.get("status", "UNKNOWN")).upper()
 
             if status == "FAIL":
