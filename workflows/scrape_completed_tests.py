@@ -10,8 +10,11 @@ def scrape_completed_tests(ctx, completed_tests):
         Open results page once and scrape all administered known tests.
 
     Fallback behavior:
-        If base_scraper does not yet provide run_configured_battery_scraper(),
-        use the existing run_configured_scraper() once per test.
+        If base_scraper does not provide run_configured_battery_scraper(),
+        use run_configured_scraper() once per test.
+
+    CSV output:
+        ctx.output_dir / config.csv_file
     """
     records_to_scrape = []
     scrape_results = []
@@ -54,6 +57,11 @@ def scrape_completed_tests(ctx, completed_tests):
         ctx.logger.info("No administered known tests to scrape.")
         return scrape_results
 
+    browser = getattr(ctx, "browser", "chrome")
+    headless = getattr(ctx, "headless", False)
+    strategy = getattr(ctx, "strategy", "battery")
+    output_dir = getattr(ctx, "output_dir", None)
+
     battery_scraper = getattr(base_scraper, "run_configured_battery_scraper", None)
 
     if callable(battery_scraper):
@@ -69,23 +77,27 @@ def scrape_completed_tests(ctx, completed_tests):
         try:
             result = battery_scraper(
                 subid=ctx.subid,
-                strategy=getattr(ctx, "strategy", "battery"),
+                strategy=strategy,
                 test_results=records_to_scrape,
                 configs=configs,
-                browser="chrome",
-                headless=False,
+                browser=browser,
+                headless=headless,
+                output_dir=output_dir,
             )
 
-            for record in records_to_scrape:
+            if isinstance(result, list):
+                scrape_results.extend(result)
+            else:
                 scrape_results.append({
-                    "test_name": record["test_name"],
-                    "status": record.get("status", "UNKNOWN"),
-                    "scrape_status": "PASS",
+                    "test_name": "battery",
+                    "status": "UNKNOWN",
+                    "scrape_status": "UNKNOWN_RESULT",
                     "result": result,
                 })
 
         except Exception as exc:
-            ctx.logger.error(f"Battery scraping failed: {exc}")
+            ctx.logger.exception(f"Battery scraping failed: {exc}")
+
             for record in records_to_scrape:
                 scrape_results.append({
                     "test_name": record["test_name"],
@@ -108,27 +120,31 @@ def scrape_completed_tests(ctx, completed_tests):
         try:
             result = base_scraper.run_configured_scraper(
                 subid=ctx.subid,
-                strategy=getattr(ctx, "strategy", "battery"),
+                strategy=strategy,
                 test_result=record,
                 config=config,
-                browser="chrome",
-                headless=False,
+                browser=browser,
+                headless=headless,
+                output_dir=output_dir,
             )
 
             scrape_results.append({
                 "test_name": test_name,
                 "status": status,
-                "scrape_status": "PASS",
+                "scrape_status": "PASS" if result else "FAIL",
                 "result": result,
+                "csv_file": str(output_dir / config.csv_file) if output_dir else config.csv_file,
             })
 
         except Exception as exc:
-            ctx.logger.error(f"Scraping failed for {test_name}: {exc}")
+            ctx.logger.exception(f"Scraping failed for {test_name}: {exc}")
+
             scrape_results.append({
                 "test_name": test_name,
                 "status": status,
                 "scrape_status": "FAIL",
                 "errors": [str(exc)],
+                "csv_file": str(output_dir / config.csv_file) if output_dir else config.csv_file,
             })
 
     return scrape_results
