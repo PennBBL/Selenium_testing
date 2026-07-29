@@ -1,25 +1,10 @@
 # Selenium Battery Framework - First Pass
 
-## Initial setup
+This is a first-pass integration scaffold for a 3-test battery:
 
-Clone repository.
-
-### Setup virtual environment
-% python3 -m venv .venv
-
-% source .venv/bin/activate
-
-### Install requirements:
-pip install -r requirements.txt
-
-# Auth
-Contains the login function.
-
-# Add account info
-In the cnb_selenium_testing folder create a .env file with the following content:
- - adminid=your_cnb_admin_id
- - pwd=your_cnb_password
-
+- ER40: `k-er40-d-4.60-ff`
+- CPW: `k-cpw-3.01-ff`
+- VSPLOT: `zn_CN-vsplot24-2.10-ff`
 
 It is designed for:
 
@@ -33,6 +18,7 @@ It is designed for:
 
 ## Important setup step
 
+Replace `core/assessment_link.py` with your existing `core/assessment_link.py` implementation. The included file is a placeholder because the original function was imported by your existing scripts but not uploaded here.
 
 You also need your existing `auth/login.py` module available for scraping, because the scraper imports:
 
@@ -73,4 +59,15 @@ CSV files are currently written in the working directory as:
 - `cpw_results.csv`
 - `vsplot_results.csv`
 
+## Expected first adjustments
 
+The framework assumes the runner clicks the exact-code landing page before calling each plugin. If one plugin starts one page too early/late, adjust the number of continue clicks inside that plugin.
+
+The most likely first adjustment is in `tests_catalog/vsplot_plugin.py`:
+
+```python
+for i in range(3):
+    self._click_continue(ctx, f'instruction {i + 1}/3')
+```
+
+Your standalone VSPLOT clicked 4 instruction continues. This framework clicks the landing page first, so the plugin currently clicks 3.

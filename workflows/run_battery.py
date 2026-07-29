@@ -14,6 +14,7 @@ Behavior:
     3. otherwise treats the battery as complete
 - When the battery is complete, waits 5 seconds before returning to runner.
 """
+from __future__ import annotations
 
 import re
 import time
