@@ -4,6 +4,8 @@ Battery workflow.
 Behavior:
 - Reads exact p.test-name from each test landing page.
 - Dispatches to the correct plugin based on exact test code.
+- If selected-test mode is enabled, skips every unselected test with Ctrl + .
+  until it reaches selected test groups/codes.
 - If the test is unknown, logs it as FAIL, saves artifacts, presses Ctrl + .,
   and continues the battery if possible.
 - If a known plugin fails or raises an exception, logs it as FAIL, saves artifacts,
@@ -31,10 +33,12 @@ from tests_catalog.registry import TEST_REGISTRY, DEFAULT_STRATEGIES
 
 
 FAIL_STATUS = "FAIL"
+SKIP_STATUS = "SKIP"
 
 UNKNOWN_TEST_ERROR = "Unknown test code; skipped with Ctrl+."
 PLUGIN_FAIL_SKIP_ERROR = "Known plugin failed; skipped with Ctrl+."
 PLUGIN_EXCEPTION_SKIP_ERROR = "Known plugin raised exception; skipped with Ctrl+."
+UNSELECTED_TEST_SKIP_ERROR = "Not in selected test list; skipped with Ctrl+."
 
 GO_LINK = (By.XPATH, "//a[.//img[contains(@src, 'go.png')]]")
 QUIT_LINK = (By.XPATH, "//a[contains(@href, 'op=Quit') or .//img[contains(@src, 'stop.png')]]")
@@ -156,6 +160,105 @@ def _record_completed_test(ctx, exact_code: str, result) -> dict[str, Any]:
     return record
 
 
+def _record_skipped_unselected_test(ctx, exact_code: str) -> dict[str, Any]:
+    """Record a test intentionally skipped because it was not selected."""
+    record = {
+        "test_name": exact_code,
+        "status": SKIP_STATUS,
+        "errors": [UNSELECTED_TEST_SKIP_ERROR],
+        "skipped": True,
+        "skip_method": "ctrl_period",
+        "scrape": False,
+        "skip_reason": "not_selected",
+    }
+
+    ctx.completed_tests.append(record)
+
+    try:
+        ctx.registry.mark_test_completed(
+            ctx.subid,
+            exact_code,
+            SKIP_STATUS,
+            [UNSELECTED_TEST_SKIP_ERROR],
+        )
+    except Exception as exc:
+        ctx.logger.warning(f"Could not mark unselected skipped test in registry: {exc}")
+
+    return record
+
+
+def _generic_group_name(exact_code: str) -> str:
+    """
+    Convert exact test codes into generic group names.
+
+    Examples:
+      zn_CN-k-pcet-3.00-ff    -> pcet
+      k-pcet-3.00-ff          -> pcet
+      zn_CN-spcptnl-2.01-ff   -> spcptnl
+      pmat24-a-2.00-ff        -> pmat
+      medf36-a-3.06-ff        -> medf
+      zn_CN-vsplot24-2.10-ff  -> vsplot
+    """
+    code = (exact_code or "").strip().lower()
+    code = re.sub(r"^[a-z]{2}_[a-z]{2}-", "", code)
+
+    if code.startswith("k-"):
+        code = code[2:]
+
+    match = re.match(r"[a-z]+", code)
+    if match:
+        return match.group(0)
+
+    return code.split("-", 1)[0]
+
+
+def _selected_mode_enabled(ctx) -> bool:
+    return getattr(ctx, "run_scope", "all") == "selected"
+
+
+def _selected_test_tokens(ctx) -> list[str]:
+    return [
+        str(token).strip().lower()
+        for token in getattr(ctx, "selected_test_tokens", [])
+        if str(token).strip()
+    ]
+
+
+def _test_is_selected(ctx, exact_code: str) -> bool:
+    tokens = _selected_test_tokens(ctx)
+
+    if not tokens:
+        return True
+
+    exact_lower = (exact_code or "").lower()
+    group = _generic_group_name(exact_code)
+
+    for token in tokens:
+        if token == exact_lower:
+            return True
+
+        if token == group:
+            return True
+
+        # Helpful fallback: "pcet" matches "zn_CN-k-pcet-3.00-ff".
+        if token in exact_lower:
+            return True
+
+    return False
+
+
+def _skip_unselected_test(ctx, exact_code: str) -> dict[str, Any]:
+    ctx.logger.info(
+        "Skipping unselected test %s with Ctrl+. Selected tokens=%s",
+        exact_code,
+        _selected_test_tokens(ctx),
+    )
+
+    record = _record_skipped_unselected_test(ctx, exact_code)
+    _send_ctrl_period(ctx)
+    return record
+
+
 def _wait_for_landing_or_go_or_final(ctx, timeout: int = 8) -> str:
     """
     Inspect the current page after a test ends or after Ctrl+. Returns:
@@ -163,6 +266,7 @@ def _wait_for_landing_or_go_or_final(ctx, timeout: int = 8) -> str:
     "go"       -> battery inter-test page has go.png
     "landing"  -> next p.test-name landing page is already present
     "final"    -> no next controls appeared within timeout
+    "quit"     -> final quit/stop link appeared
     """
     deadline = time.time() + timeout
 
@@ -172,6 +276,9 @@ def _wait_for_landing_or_go_or_final(ctx, timeout: int = 8) -> str:
 
         if _page_has_test_landing(ctx):
             return "landing"
+
+        if _page_has_quit(ctx):
+            return "quit"
 
         time.sleep(0.5)
 
@@ -298,6 +405,13 @@ def run_battery(ctx, registry=None):
     Run an order-independent battery.
 
     The exact p.test-name on each landing page determines which plugin is used.
+
+    If ctx.run_scope == "selected", only tests matching ctx.selected_test_tokens
+    are administered. Non-selected tests are skipped with Ctrl+. Matching supports:
+      - generic group name, e.g. pcet
+      - exact code, e.g. zn_CN-k-pcet-3.00-ff
+      - fallback substring match
+
     Unknown tests are marked FAIL, skipped with Ctrl+., and the battery continues
     when possible.
 
@@ -312,6 +426,15 @@ def run_battery(ctx, registry=None):
         exact_code = landing.get_exact_test_code()
         ctx.exact_code = exact_code
         ctx.logger.info(f"Detected landing test code: {exact_code}")
+
+        if _selected_mode_enabled(ctx) and not _test_is_selected(ctx, exact_code):
+            record = _skip_unselected_test(ctx, exact_code)
+            completed.append(record)
+
+            if _advance_after_test(ctx):
+                continue
+
+            break
 
         if exact_code not in registry:
             record = _skip_unknown_test(ctx, exact_code)
