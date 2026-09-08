@@ -261,104 +261,146 @@ class ZN_SPCPTNLPlugin:
     def _wait_through_countdown(self, seconds=5.5):
         time.sleep(seconds)
 
-    def _run_practice_with_template(self, ctx, template, label, timeout=180):
-        """
-        Poll the canvas quickly. Press Space only when the current canvas resembles
-        the target template.
+def _feedback_spacebar_visible(self, ctx):
+    """
+    Feedback pages explicitly show '按空格键继续'.
 
-        Important:
-        - Do not press Space on non-target canvas screens.
-        - Do not repeatedly press Space while the same target remains visible.
-        - Debounce template flicker so brief score changes do not trigger repeated
-        target presses.
-        """
-        ctx.logger.info(f"SPCPTNL starting {label} practice with template matching")
+    Important: these pages may still contain the old canvas, so this check
+    must run before canvas/template matching.
+    """
+    try:
+        tables = ctx.driver.find_elements(By.CSS_SELECTOR, ".spacebar-response--table")
+        for table in tables:
+            if table.is_displayed():
+                return True
+    except Exception:
+        pass
 
-        deadline = time.time() + timeout
-        target_presses = 0
+    try:
+        body_text = ctx.driver.find_element(By.TAG_NAME, "body").text
+        return (
+            "按空格键继续" in body_text
+            or "Press spacebar to continue" in body_text
+        )
+    except Exception:
+        return False
 
-        last_feedback_space = 0
-        last_log = 0
 
-        target_active = False
-        last_matched_time = 0
-        last_unmatched_time = 0
-        last_target_press = 0
+def _wait_for_feedback_to_clear(self, ctx, timeout=5):
+    deadline = time.time() + timeout
 
-        last_score = None
-        last_matched = False
+    while time.time() < deadline:
+        if not self._feedback_spacebar_visible(ctx):
+            return True
+        time.sleep(0.1)
 
-        # Avoid duplicate presses caused by template score flicker.
-        target_press_cooldown = 1.75
+    return False
 
-        while time.time() < deadline:
-            now = time.time()
 
-            if self._continue_visible(ctx):
+def _run_practice_with_template(self, ctx, template, label, timeout=180):
+    """
+    App.js-confirmed practice logic:
+
+    - sampleSize: 3
+    - terminate: 3 consecutive correct
+    - only pracNum1/pracLet1 has correct: 32
+    - non-target practice images should receive no response
+    - feedback page uses '按空格键继续'
+    """
+    ctx.logger.info(f"SPCPTNL starting {label} practice with template matching")
+
+    deadline = time.time() + timeout
+    target_presses = 0
+    feedback_clears = 0
+
+    target_active = False
+    last_matched_time = 0
+    last_target_press = 0
+    last_log = 0
+    last_score = None
+    last_matched = False
+
+    target_press_cooldown = 1.4
+
+    while time.time() < deadline:
+        now = time.time()
+
+        # 1. Practice complete.
+        if self._continue_visible(ctx):
+            ctx.logger.info(
+                f"SPCPTNL {label} practice complete; "
+                f"target_presses={target_presses}; "
+                f"feedback_clears={feedback_clears}"
+            )
+            return
+
+        # 2. Feedback page.
+        # Must be checked before canvas, because feedback page can retain canvas.
+        if self._feedback_spacebar_visible(ctx):
+            ctx.logger.info(
+                f"SPCPTNL {label} feedback page visible; pressing Space to continue"
+            )
+            self._press_space(ctx, f"{label} feedback continue")
+            feedback_clears += 1
+            self._wait_for_feedback_to_clear(ctx, timeout=5)
+
+            target_active = False
+            time.sleep(0.3)
+            continue
+
+        # 3. Practice stimulus canvas.
+        if self._canvas_visible(ctx):
+            matched, score = self._canvas_matches_template(
+                ctx,
+                template,
+                threshold=18.0,
+            )
+
+            last_score = score
+            last_matched = matched
+
+            if now - last_log > 2 and score is not None:
                 ctx.logger.info(
-                    f"SPCPTNL {label} practice complete; "
-                    f"target_presses={target_presses}"
+                    "SPCPTNL %s practice template score=%.2f matched=%s "
+                    "target_active=%s target_presses=%s feedback_clears=%s",
+                    label,
+                    score,
+                    matched,
+                    target_active,
+                    target_presses,
+                    feedback_clears,
                 )
-                return
+                last_log = now
 
-            if self._canvas_visible(ctx):
-                matched, score = self._canvas_matches_template(
-                    ctx,
-                    template,
-                    threshold=18.0,
-                )
+            if matched:
+                last_matched_time = now
 
-                last_score = score
-                last_matched = matched
-
-                if now - last_log > 2 and score is not None:
-                    ctx.logger.info(
-                        "SPCPTNL %s practice template score=%.2f matched=%s "
-                        "target_active=%s target_presses=%s",
-                        label,
-                        score,
-                        matched,
-                        target_active,
-                        target_presses,
-                    )
-                    last_log = now
-
-                if matched:
-                    last_matched_time = now
-
-                    # Press only on a new target appearance and only after cooldown.
-                    if not target_active and now - last_target_press >= target_press_cooldown:
-                        self._press_space(ctx, f"{label} target match score={score:.2f}")
-                        target_presses += 1
-                        last_target_press = now
-                        target_active = True
-
-                else:
-                    last_unmatched_time = now
-
-                    # Debounce flicker. Do not reset target_active immediately,
-                    # because scores can briefly jump above threshold.
-                    if target_active and now - last_matched_time > 0.6:
-                        target_active = False
-
-                # Do NOT press Space here for canvas feedback/interstitial.
-                # Non-target canvas screens should receive no response.
+                if not target_active and now - last_target_press >= target_press_cooldown:
+                    self._press_space(ctx, f"{label} target match score={score:.2f}")
+                    target_presses += 1
+                    last_target_press = now
+                    target_active = True
+                    time.sleep(0.35)
 
             else:
-                # Only non-canvas feedback/interstitial pages may need Space.
-                if not self._continue_visible(ctx):
-                    if now - last_feedback_space > 1.2:
-                        self._press_space(ctx, f"{label} non-canvas feedback/interstitial")
-                        last_feedback_space = now
+                # Do not press Space on non-target practice images.
+                # Just wait for the next stimulus.
+                if target_active and now - last_matched_time > 0.5:
+                    target_active = False
 
-            time.sleep(0.06)
+        else:
+            # No feedback, no continue, no canvas. Wait.
+            time.sleep(0.1)
 
-        raise RuntimeError(
-            f"SPCPTNL {label} practice did not finish; "
-            f"target_presses={target_presses}; "
-            f"last_score={last_score}; "
-            f"last_matched={last_matched}"
-        )
+        time.sleep(0.06)
+
+    raise RuntimeError(
+        f"SPCPTNL {label} practice did not finish; "
+        f"target_presses={target_presses}; "
+        f"feedback_clears={feedback_clears}; "
+        f"last_score={last_score}; "
+        f"last_matched={last_matched}"
+    )
 
     def _start_number_practice(self, ctx):
         self._click_continue_required(ctx, "initial instructions", timeout=20)
