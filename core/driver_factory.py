@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import shutil
 
+from pathlib import Path
+from selenium.webdriver.edge.service import Service as EdgeService
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options as ChromeOptions
 from selenium.webdriver.edge.options import Options as EdgeOptions
@@ -21,12 +23,30 @@ EDGE_BINARIES = [
     "microsoft-edge-stable",
     "msedge",
 ]
+EDGE_DRIVER_BINARIES = [
+    "./drivers/msedgedriver",
+    "msedgedriver",
+    "/usr/local/bin/msedgedriver",
+    "/usr/bin/msedgedriver",
+]
 
 FIREFOX_BINARIES = [
     "firefox",
     "firefox-esr",
 ]
 
+def _find_existing_path(candidates):
+    for candidate in candidates:
+        path = Path(candidate)
+
+        if path.exists() and path.is_file():
+            return str(path.resolve())
+
+        found = shutil.which(candidate)
+        if found:
+            return found
+
+    return None
 
 def _env_flag(name: str, default: bool | None = None) -> bool | None:
     value = os.getenv(name)
@@ -135,7 +155,19 @@ def build_driver(browser: str = "chrome", headless: bool | None = None):
         return webdriver.Chrome(options=_build_chrome_options(resolved_headless))
 
     if browser in {"edge", "msedge", "microsoft-edge"}:
-        return webdriver.Edge(options=_build_edge_options(resolved_headless))
+        edge_driver = _find_existing_path(EDGE_DRIVER_BINARIES)
+
+        if not edge_driver:
+            raise RuntimeError(
+                "Edge was selected, but msedgedriver was not found locally. "
+                "Install a matching msedgedriver version and place it at "
+                "./drivers/msedgedriver or somewhere on PATH."
+            )
+
+        return webdriver.Edge(
+            service=EdgeService(executable_path=edge_driver),
+            options=_build_edge_options(resolved_headless),
+        )
 
     if browser in {"firefox", "mozilla", "ff"}:
         return webdriver.Firefox(options=_build_firefox_options(resolved_headless))
