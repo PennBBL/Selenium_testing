@@ -72,10 +72,10 @@ TEST_REGISTRY = {
     "kr_KR-k-pcet-3.00-ff": PCETPlugin,
 
     # SPCPTNL
-    "spcptnl-2.01-ff": SPCPTNLPlugin,
-    "zn_CN-spcptnl-2.01-ff": ZN_SPCPTNLPlugin,
-    "zh_CN-spcptnl-2.01-ff": ZN_SPCPTNLPlugin,
-    "kr_KR-spcptnl-2.01-ff": ZN_SPCPTNLPlugin,
+    #"spcptnl-2.01-ff": SPCPTNLPlugin,
+    #"zn_CN-spcptnl-2.01-ff": ZN_SPCPTNLPlugin,
+    #"zh_CN-spcptnl-2.01-ff": ZN_SPCPTNLPlugin,
+    #"kr_KR-spcptnl-2.01-ff": ZN_SPCPTNLPlugin,
 
     # Not enabled yet: no plugin currently imported/available in this registry.
     # "zn_CN-slnb2-2.00-ff": SLNB2Plugin,
