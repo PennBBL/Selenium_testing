@@ -351,39 +351,152 @@ class PCETPlugin:
         )
 
     def _dispatch_cdp_click(self, ctx, x, y):
-        ctx.driver.execute_cdp_cmd(
-            "Input.dispatchMouseEvent",
-            {
-                "type": "mouseMoved",
-                "x": x,
-                "y": y,
-                "button": "none",
-                "buttons": 0,
-            },
-        )
+        """
+        Click at viewport/client coordinates.
 
-        ctx.driver.execute_cdp_cmd(
-            "Input.dispatchMouseEvent",
-            {
-                "type": "mousePressed",
-                "x": x,
-                "y": y,
-                "button": "left",
-                "buttons": 1,
-                "clickCount": 1,
-            },
-        )
+        Chrome/Edge:
+            Use CDP Input.dispatchMouseEvent.
 
-        ctx.driver.execute_cdp_cmd(
-            "Input.dispatchMouseEvent",
-            {
-                "type": "mouseReleased",
-                "x": x,
-                "y": y,
-                "button": "left",
-                "buttons": 0,
-                "clickCount": 1,
-            },
+        Firefox:
+            CDP is unavailable, so fall back to Selenium W3C pointer actions.
+            If that fails, fall back to dispatching DOM mouse/pointer events.
+        """
+        x = int(round(x))
+        y = int(round(y))
+
+        # Chrome / Edge path.
+        try:
+            ctx.driver.execute_cdp_cmd(
+                "Input.dispatchMouseEvent",
+                {
+                    "type": "mouseMoved",
+                    "x": x,
+                    "y": y,
+                    "button": "none",
+                    "buttons": 0,
+                },
+            )
+
+            ctx.driver.execute_cdp_cmd(
+                "Input.dispatchMouseEvent",
+                {
+                    "type": "mousePressed",
+                    "x": x,
+                    "y": y,
+                    "button": "left",
+                    "buttons": 1,
+                    "clickCount": 1,
+                },
+            )
+
+            ctx.driver.execute_cdp_cmd(
+                "Input.dispatchMouseEvent",
+                {
+                    "type": "mouseReleased",
+                    "x": x,
+                    "y": y,
+                    "button": "left",
+                    "buttons": 0,
+                    "clickCount": 1,
+                },
+            )
+
+            return
+
+        except Exception as exc:
+            ctx.logger.info(
+                "PCET CDP click unavailable; trying W3C pointer click. "
+                "client=(%s, %s), error=%s",
+                x,
+                y,
+                exc,
+            )
+
+        # Firefox-safe W3C pointer action path.
+        try:
+            from selenium.webdriver.common.actions import interaction
+            from selenium.webdriver.common.actions.action_builder import ActionBuilder
+            from selenium.webdriver.common.actions.pointer_input import PointerInput
+
+            mouse = PointerInput(interaction.POINTER_MOUSE, "mouse")
+            actions = ActionBuilder(ctx.driver, mouse=mouse)
+
+            actions.pointer_action.move_to_location(x, y)
+            actions.pointer_action.pointer_down()
+            actions.pointer_action.pause(0.05)
+            actions.pointer_action.pointer_up()
+            actions.perform()
+
+            return
+
+        except Exception as exc:
+            ctx.logger.info(
+                "PCET W3C pointer click failed; trying DOM event fallback. "
+                "client=(%s, %s), error=%s",
+                x,
+                y,
+                exc,
+            )
+
+        # Last-resort browser-agnostic DOM event fallback.
+        ctx.driver.execute_script(
+            """
+            const x = arguments[0];
+            const y = arguments[1];
+            const el = document.elementFromPoint(x, y);
+
+            if (!el) {
+                throw new Error(`No element at point ${x}, ${y}`);
+            }
+
+            function fireMouse(type, buttons) {
+                const ev = new MouseEvent(type, {
+                    bubbles: true,
+                    cancelable: true,
+                    view: window,
+                    clientX: x,
+                    clientY: y,
+                    screenX: x,
+                    screenY: y,
+                    button: 0,
+                    buttons: buttons
+                });
+                el.dispatchEvent(ev);
+            }
+
+            function firePointer(type, buttons) {
+                if (!window.PointerEvent) return;
+
+                const ev = new PointerEvent(type, {
+                    bubbles: true,
+                    cancelable: true,
+                    view: window,
+                    clientX: x,
+                    clientY: y,
+                    screenX: x,
+                    screenY: y,
+                    button: 0,
+                    buttons: buttons,
+                    pointerId: 1,
+                    pointerType: "mouse",
+                    isPrimary: true
+                });
+                el.dispatchEvent(ev);
+            }
+
+            firePointer("pointermove", 0);
+            fireMouse("mousemove", 0);
+
+            firePointer("pointerdown", 1);
+            fireMouse("mousedown", 1);
+
+            firePointer("pointerup", 0);
+            fireMouse("mouseup", 0);
+
+            fireMouse("click", 0);
+            """,
+            x,
+            y,
         )
 
     def _wait_for_blue_object_target(self, ctx, canvas, response_index, timeout=6):
