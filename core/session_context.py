@@ -12,7 +12,7 @@ class SessionContext:
     subid: str
     battery_code: str
     output_dir: Path
-    base_url: str = 'https://penncnp-dev.pmacs.upenn.edu/assessments.pl?start=1'
+    base_url: str = 'https://penncnp.pmacs.upenn.edu/assessments.pl?start=1'
     env_code: str = 'TEST'
     browser: str = 'chrome'
     headless: bool = False
