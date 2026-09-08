@@ -1,3 +1,15 @@
+# Initial setup
+Clone repository.
+
+#Setup virtual environment
+% python3 -m venv .venv
+
+% source .venv/bin/activate
+
+Install requirements:
+pip install -r requirements.txt
+
+
 # Selenium Battery Framework - First Pass
 
 This is a first-pass integration scaffold for a 3-test battery:
