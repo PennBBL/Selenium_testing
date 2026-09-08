@@ -1,6 +1,5 @@
 import time
 
-from selenium.webdriver import ActionChains
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 
@@ -8,14 +7,13 @@ from tests_catalog.common import TestRunResult
 from core.continue_utils import click_continue
 
 
-class ZN_SPCPTNLPlugin:
-    exact_code = "zn_CN-spcptnl-2.01-ff"
+class SPCPTNLPlugin:
+    exact_code = "spcptnl-2.01-ff"
 
     exact_codes = {
         "spcptnl-2.01-ff",
         "zn_CN-spcptnl-2.01-ff",
         "zh_CN-spcptnl-2.01-ff",
-        "kr_KR-spcptnl-2.01-ff",
     }
 
     MAIN_NUMBER_TRIALS = 5
@@ -28,59 +26,8 @@ class ZN_SPCPTNLPlugin:
     ]
 
     def _press_space(self, ctx, label="space"):
-        """
-        Robust Space press for headless Chrome.
-
-        SPCPTNL is keyboard-driven. In headless Chrome, body.send_keys(Keys.SPACE)
-        can sometimes fail to reach the app if focus is not where we expect.
-        Prefer CDP keyboard events, then fall back to ActionChains/body.
-        """
         ctx.logger.info(f"SPCPTNL pressing space: {label}")
-
-        try:
-            ctx.driver.execute_script(
-                """
-                window.focus();
-                if (document.body) {
-                    document.body.focus();
-                }
-                """
-            )
-        except Exception:
-            pass
-
-        # Best option for Chrome/headless Chrome.
-        try:
-            key_event = {
-                "key": " ",
-                "code": "Space",
-                "windowsVirtualKeyCode": 32,
-                "nativeVirtualKeyCode": 32,
-                "text": " ",
-                "unmodifiedText": " ",
-            }
-
-            ctx.driver.execute_cdp_cmd(
-                "Input.dispatchKeyEvent",
-                {"type": "keyDown", **key_event},
-            )
-            time.sleep(0.03)
-            ctx.driver.execute_cdp_cmd(
-                "Input.dispatchKeyEvent",
-                {"type": "keyUp", **key_event},
-            )
-            return
-        except Exception:
-            ctx.logger.warning("SPCPTNL CDP Space failed; trying ActionChains")
-
-        try:
-            ActionChains(ctx.driver).send_keys(Keys.SPACE).perform()
-            return
-        except Exception:
-            ctx.logger.warning("SPCPTNL ActionChains Space failed; trying body.send_keys")
-
         body = ctx.driver.find_element(By.TAG_NAME, "body")
-        body.click()
         body.send_keys(Keys.SPACE)
 
     def _click_continue_required(self, ctx, label, timeout=20):
@@ -96,25 +43,6 @@ class ZN_SPCPTNLPlugin:
             for button in buttons:
                 try:
                     if button.is_displayed() and button.is_enabled():
-                        return True
-                except Exception:
-                    continue
-
-        return False
-
-    def _click_continue_if_visible(self, ctx, label="continue"):
-        for selector in self.CONTINUE_SELECTORS:
-            try:
-                buttons = ctx.driver.find_elements(By.CSS_SELECTOR, selector)
-            except Exception:
-                continue
-
-            for button in buttons:
-                try:
-                    if button.is_displayed() and button.is_enabled():
-                        ctx.logger.info(f"SPCPTNL clicking visible continue: {label}")
-                        ctx.driver.execute_script("arguments[0].click();", button)
-                        time.sleep(0.5)
                         return True
                 except Exception:
                     continue
@@ -213,23 +141,22 @@ class ZN_SPCPTNLPlugin:
             if click_index >= max_clicks:
                 break
 
-            if self._click_continue_if_visible(ctx, f"{label} continue {click_index + 1}"):
-                end = time.time() + 7
-                while time.time() < end:
-                    if self._visible_image_contains(ctx, image_fragment):
-                        ctx.logger.info(
-                            "SPCPTNL %s: image fragment %r visible after click",
-                            label,
-                            image_fragment,
-                        )
-                        return
-                    time.sleep(0.1)
-            else:
-                self._click_continue_required(
-                    ctx,
-                    f"{label} continue {click_index + 1}",
-                    timeout=timeout,
-                )
+            self._click_continue_required(
+                ctx,
+                f"{label} continue {click_index + 1}",
+                timeout=timeout,
+            )
+
+            end = time.time() + 7
+            while time.time() < end:
+                if self._visible_image_contains(ctx, image_fragment):
+                    ctx.logger.info(
+                        "SPCPTNL %s: image fragment %r visible after click",
+                        label,
+                        image_fragment,
+                    )
+                    return
+                time.sleep(0.1)
 
         raise RuntimeError(
             f"SPCPTNL {label}: expected image fragment {image_fragment!r} "
@@ -252,15 +179,7 @@ class ZN_SPCPTNLPlugin:
         ctx.logger.info("SPCPTNL waiting for number practice image after countdown")
         self._wait_for_image_fragment(ctx, "pracNum", timeout=30)
 
-    def _run_practice(
-        self,
-        ctx,
-        practice_prefix,
-        target_fragment,
-        label,
-        timeout=90,
-        min_target_presses=1,
-    ):
+    def _run_practice(self, ctx, practice_prefix, target_fragment, label, timeout=90):
         """
         Practice is randomized.
 
@@ -270,10 +189,9 @@ class ZN_SPCPTNLPlugin:
 
         Non-target stimuli should receive no response.
 
-        Practice normally ends when a Continue button appears. If the target was
-        detected and pressed but the same target remains stuck, re-send Space
-        periodically. This handles headless cases where the first Space did not
-        register.
+        Practice ends when a continue button appears for the next instruction or
+        begin page. Feedback/interstitial screens may require space to advance,
+        so this presses space only when no practice image is visible.
         """
         ctx.logger.info(f"SPCPTNL starting {label} practice")
 
@@ -281,9 +199,6 @@ class ZN_SPCPTNLPlugin:
         target_currently_visible = False
         target_presses = 0
         last_feedback_space = 0
-        last_target_press = 0
-        last_stuck_resend = 0
-        last_srcs = []
 
         practice_prefix = practice_prefix.lower()
         target_fragment = target_fragment.lower()
@@ -296,9 +211,7 @@ class ZN_SPCPTNLPlugin:
                 )
                 return
 
-            srcs = self._visible_image_srcs(ctx)
-            last_srcs = srcs
-            srcs_lower = [src.lower() for src in srcs]
+            srcs_lower = [src.lower() for src in self._visible_image_srcs(ctx)]
 
             practice_image_visible = any(practice_prefix in src for src in srcs_lower)
             target_visible = any(target_fragment in src for src in srcs_lower)
@@ -307,30 +220,12 @@ class ZN_SPCPTNLPlugin:
                 time.sleep(0.05)
                 self._press_space(ctx, f"{label} target {target_fragment}")
                 target_presses += 1
-                last_target_press = time.time()
                 target_currently_visible = True
 
             if not target_visible:
                 target_currently_visible = False
 
-            # If the target was pressed but the target image never disappears,
-            # the Space event probably did not register. Re-send it slowly.
-            now = time.time()
-            if (
-                target_visible
-                and target_presses >= min_target_presses
-                and now - last_target_press > 1.2
-                and now - last_stuck_resend > 1.2
-            ):
-                ctx.logger.warning(
-                    f"SPCPTNL {label} target still visible after Space; "
-                    "re-sending Space"
-                )
-                self._press_space(ctx, f"{label} stuck target retry")
-                last_stuck_resend = now
-                last_target_press = now
-
-            # Feedback/interstitial screens often require Space.
+            # Feedback/interstitial screens often require spacebar.
             # Avoid doing this while non-target practice stimuli are visible.
             if not practice_image_visible and not self._continue_visible(ctx):
                 now = time.time()
@@ -340,41 +235,9 @@ class ZN_SPCPTNLPlugin:
 
             time.sleep(0.08)
 
-        # Final recovery. If we did see and press the target, do not fail
-        # immediately without trying to push the page forward.
-        if target_presses >= min_target_presses:
-            ctx.logger.warning(
-                f"SPCPTNL {label} practice reached target_presses={target_presses} "
-                f"but no Continue appeared before timeout. Trying final recovery."
-            )
-
-            for attempt in range(1, 4):
-                if self._click_continue_if_visible(ctx, f"{label} final recovery"):
-                    return
-
-                self._press_space(ctx, f"{label} final recovery space {attempt}")
-                time.sleep(0.6)
-
-                if self._continue_visible(ctx):
-                    ctx.logger.info(
-                        f"SPCPTNL {label} practice recovered after final Space; "
-                        f"target_presses={target_presses}"
-                    )
-                    return
-
-            # Let the next stage try to continue. This is better than failing
-            # after the correct target was already found and pressed.
-            ctx.logger.warning(
-                f"SPCPTNL {label} accepting practice as complete after "
-                f"target_presses={target_presses}; "
-                f"last visible images={[src.split('/')[-1] for src in last_srcs]}"
-            )
-            return
-
         raise RuntimeError(
             f"SPCPTNL {label} practice did not finish within {timeout}s; "
-            f"target_presses={target_presses}; "
-            f"last visible images={[src.split('/')[-1] for src in last_srcs]}"
+            f"target_presses={target_presses}"
         )
 
     def _start_letter_practice(self, ctx):
@@ -438,7 +301,7 @@ class ZN_SPCPTNLPlugin:
           number block: num*
           letter block: let*
 
-        So press Space once for each new visible stimulus.
+        So press space once for each new visible stimulus.
         """
         ctx.logger.info(f"SPCPTNL starting main {label} block")
 
@@ -501,7 +364,7 @@ class ZN_SPCPTNLPlugin:
         errors = []
 
         try:
-            ctx.logger.info("SPCPTNL Chinese starting")
+            ctx.logger.info("SPCPTNL starting")
 
             self._start_number_practice(ctx)
 
@@ -511,7 +374,6 @@ class ZN_SPCPTNLPlugin:
                 target_fragment="pracNum1",
                 label="number",
                 timeout=90,
-                min_target_presses=1,
             )
 
             self._start_letter_practice(ctx)
@@ -522,7 +384,6 @@ class ZN_SPCPTNLPlugin:
                 target_fragment="pracLet1",
                 label="letter",
                 timeout=90,
-                min_target_presses=1,
             )
 
             self._start_main_test(ctx)
@@ -547,23 +408,6 @@ class ZN_SPCPTNLPlugin:
 
         except Exception as exc:
             errors.append(str(exc))
-            ctx.logger.exception("SPCPTNL Chinese failed")
-
-            try:
-                ctx.artifacts.capture_failure(
-                    ctx.driver,
-                    "spcptnl_chinese_failure",
-                    {"errors": errors},
-                )
-            except Exception:
-                ctx.logger.exception("Could not capture SPCPTNL failure artifact")
-
+            ctx.logger.exception("SPCPTNL failed")
+            ctx.artifacts.capture_failure(ctx.driver, "spcptnl_failure", {"errors": errors})
             return TestRunResult(status="FAIL", errors=errors)
-
-
-# Compatibility alias.
-# This lets the same file work whether registry imports:
-#   from tests_catalog.zn_spcptnl_plugin import ZN_SPCPTNLPlugin
-# or:
-#   from tests_catalog.zn_spcptnl_plugin import SPCPTNLPlugin
-SPCPTNLPlugin = ZN_SPCPTNLPlugin
