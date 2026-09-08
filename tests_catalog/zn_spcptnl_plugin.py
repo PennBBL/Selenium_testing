@@ -261,146 +261,146 @@ class ZN_SPCPTNLPlugin:
     def _wait_through_countdown(self, seconds=5.5):
         time.sleep(seconds)
 
-def _feedback_spacebar_visible(self, ctx):
-    """
-    Feedback pages explicitly show '按空格键继续'.
+    def _feedback_spacebar_visible(self, ctx):
+        """
+        Feedback pages explicitly show '按空格键继续'.
 
-    Important: these pages may still contain the old canvas, so this check
-    must run before canvas/template matching.
-    """
-    try:
-        tables = ctx.driver.find_elements(By.CSS_SELECTOR, ".spacebar-response--table")
-        for table in tables:
-            if table.is_displayed():
+        Important: these pages may still contain the old canvas, so this check
+        must run before canvas/template matching.
+        """
+        try:
+            tables = ctx.driver.find_elements(By.CSS_SELECTOR, ".spacebar-response--table")
+            for table in tables:
+                if table.is_displayed():
+                    return True
+        except Exception:
+            pass
+
+        try:
+            body_text = ctx.driver.find_element(By.TAG_NAME, "body").text
+            return (
+                "按空格键继续" in body_text
+                or "Press spacebar to continue" in body_text
+            )
+        except Exception:
+            return False
+
+
+    def _wait_for_feedback_to_clear(self, ctx, timeout=5):
+        deadline = time.time() + timeout
+
+        while time.time() < deadline:
+            if not self._feedback_spacebar_visible(ctx):
                 return True
-    except Exception:
-        pass
+            time.sleep(0.1)
 
-    try:
-        body_text = ctx.driver.find_element(By.TAG_NAME, "body").text
-        return (
-            "按空格键继续" in body_text
-            or "Press spacebar to continue" in body_text
-        )
-    except Exception:
         return False
 
 
-def _wait_for_feedback_to_clear(self, ctx, timeout=5):
-    deadline = time.time() + timeout
+    def _run_practice_with_template(self, ctx, template, label, timeout=180):
+        """
+        App.js-confirmed practice logic:
 
-    while time.time() < deadline:
-        if not self._feedback_spacebar_visible(ctx):
-            return True
-        time.sleep(0.1)
+        - sampleSize: 3
+        - terminate: 3 consecutive correct
+        - only pracNum1/pracLet1 has correct: 32
+        - non-target practice images should receive no response
+        - feedback page uses '按空格键继续'
+        """
+        ctx.logger.info(f"SPCPTNL starting {label} practice with template matching")
 
-    return False
+        deadline = time.time() + timeout
+        target_presses = 0
+        feedback_clears = 0
 
+        target_active = False
+        last_matched_time = 0
+        last_target_press = 0
+        last_log = 0
+        last_score = None
+        last_matched = False
 
-def _run_practice_with_template(self, ctx, template, label, timeout=180):
-    """
-    App.js-confirmed practice logic:
+        target_press_cooldown = 1.4
 
-    - sampleSize: 3
-    - terminate: 3 consecutive correct
-    - only pracNum1/pracLet1 has correct: 32
-    - non-target practice images should receive no response
-    - feedback page uses '按空格键继续'
-    """
-    ctx.logger.info(f"SPCPTNL starting {label} practice with template matching")
+        while time.time() < deadline:
+            now = time.time()
 
-    deadline = time.time() + timeout
-    target_presses = 0
-    feedback_clears = 0
-
-    target_active = False
-    last_matched_time = 0
-    last_target_press = 0
-    last_log = 0
-    last_score = None
-    last_matched = False
-
-    target_press_cooldown = 1.4
-
-    while time.time() < deadline:
-        now = time.time()
-
-        # 1. Practice complete.
-        if self._continue_visible(ctx):
-            ctx.logger.info(
-                f"SPCPTNL {label} practice complete; "
-                f"target_presses={target_presses}; "
-                f"feedback_clears={feedback_clears}"
-            )
-            return
-
-        # 2. Feedback page.
-        # Must be checked before canvas, because feedback page can retain canvas.
-        if self._feedback_spacebar_visible(ctx):
-            ctx.logger.info(
-                f"SPCPTNL {label} feedback page visible; pressing Space to continue"
-            )
-            self._press_space(ctx, f"{label} feedback continue")
-            feedback_clears += 1
-            self._wait_for_feedback_to_clear(ctx, timeout=5)
-
-            target_active = False
-            time.sleep(0.3)
-            continue
-
-        # 3. Practice stimulus canvas.
-        if self._canvas_visible(ctx):
-            matched, score = self._canvas_matches_template(
-                ctx,
-                template,
-                threshold=18.0,
-            )
-
-            last_score = score
-            last_matched = matched
-
-            if now - last_log > 2 and score is not None:
+            # 1. Practice complete.
+            if self._continue_visible(ctx):
                 ctx.logger.info(
-                    "SPCPTNL %s practice template score=%.2f matched=%s "
-                    "target_active=%s target_presses=%s feedback_clears=%s",
-                    label,
-                    score,
-                    matched,
-                    target_active,
-                    target_presses,
-                    feedback_clears,
+                    f"SPCPTNL {label} practice complete; "
+                    f"target_presses={target_presses}; "
+                    f"feedback_clears={feedback_clears}"
                 )
-                last_log = now
+                return
 
-            if matched:
-                last_matched_time = now
+            # 2. Feedback page.
+            # Must be checked before canvas, because feedback page can retain canvas.
+            if self._feedback_spacebar_visible(ctx):
+                ctx.logger.info(
+                    f"SPCPTNL {label} feedback page visible; pressing Space to continue"
+                )
+                self._press_space(ctx, f"{label} feedback continue")
+                feedback_clears += 1
+                self._wait_for_feedback_to_clear(ctx, timeout=5)
 
-                if not target_active and now - last_target_press >= target_press_cooldown:
-                    self._press_space(ctx, f"{label} target match score={score:.2f}")
-                    target_presses += 1
-                    last_target_press = now
-                    target_active = True
-                    time.sleep(0.35)
+                target_active = False
+                time.sleep(0.3)
+                continue
+
+            # 3. Practice stimulus canvas.
+            if self._canvas_visible(ctx):
+                matched, score = self._canvas_matches_template(
+                    ctx,
+                    template,
+                    threshold=18.0,
+                )
+
+                last_score = score
+                last_matched = matched
+
+                if now - last_log > 2 and score is not None:
+                    ctx.logger.info(
+                        "SPCPTNL %s practice template score=%.2f matched=%s "
+                        "target_active=%s target_presses=%s feedback_clears=%s",
+                        label,
+                        score,
+                        matched,
+                        target_active,
+                        target_presses,
+                        feedback_clears,
+                    )
+                    last_log = now
+
+                if matched:
+                    last_matched_time = now
+
+                    if not target_active and now - last_target_press >= target_press_cooldown:
+                        self._press_space(ctx, f"{label} target match score={score:.2f}")
+                        target_presses += 1
+                        last_target_press = now
+                        target_active = True
+                        time.sleep(0.35)
+
+                else:
+                    # Do not press Space on non-target practice images.
+                    # Just wait for the next stimulus.
+                    if target_active and now - last_matched_time > 0.5:
+                        target_active = False
 
             else:
-                # Do not press Space on non-target practice images.
-                # Just wait for the next stimulus.
-                if target_active and now - last_matched_time > 0.5:
-                    target_active = False
+                # No feedback, no continue, no canvas. Wait.
+                time.sleep(0.1)
 
-        else:
-            # No feedback, no continue, no canvas. Wait.
-            time.sleep(0.1)
+            time.sleep(0.06)
 
-        time.sleep(0.06)
-
-    raise RuntimeError(
-        f"SPCPTNL {label} practice did not finish; "
-        f"target_presses={target_presses}; "
-        f"feedback_clears={feedback_clears}; "
-        f"last_score={last_score}; "
-        f"last_matched={last_matched}"
-    )
+        raise RuntimeError(
+            f"SPCPTNL {label} practice did not finish; "
+            f"target_presses={target_presses}; "
+            f"feedback_clears={feedback_clears}; "
+            f"last_score={last_score}; "
+            f"last_matched={last_matched}"
+        )
 
     def _start_number_practice(self, ctx):
         self._click_continue_required(ctx, "initial instructions", timeout=20)
@@ -483,11 +483,17 @@ def _run_practice_with_template(self, ctx, template, label, timeout=180):
             ctx.logger.exception("SPCPTNL Chinese failed")
 
             try:
-                ctx.artifacts.capture_failure(
-                    ctx.driver,
-                    "zn_spcptnl_failure",
-                    {"errors": errors},
-                )
+                try:
+                    ctx.artifacts.capture_failure(
+                        ctx.driver,
+                        "zn_spcptnl_failure",
+                        {"errors": errors},
+                    )
+                except TypeError:
+                    ctx.artifacts.capture_failure(
+                        ctx.exact_code or "zn_CN-spcptnl-2.01-ff",
+                        "zn_spcptnl_failure",
+                    )
             except Exception:
                 ctx.logger.exception("Could not capture SPCPTNL Chinese failure artifact")
 
