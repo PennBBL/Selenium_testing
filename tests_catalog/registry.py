@@ -38,8 +38,8 @@ TEST_REGISTRY = {
     "zn_CN-k-pcet-3.00-ff": PCETPlugin,
     "zh_CN-k-pcet-3.00-ff": PCETPlugin,
     "spcptnl-2.01-ff": SPCPTNLPlugin,
-    "zn_CN-spcptnl-2.01-ff": ZN_SPCPTNLPlugin,
-    "zh_CN-spcptnl-2.01-ff": ZN_SPCPTNLPlugin,
+    #"zn_CN-spcptnl-2.01-ff": ZN_SPCPTNLPlugin,
+    #"zh_CN-spcptnl-2.01-ff": ZN_SPCPTNLPlugin,
     "zn_CN-k-svolt-3.01-ff": SVOLTPlugin,
 
 }
@@ -69,8 +69,8 @@ DEFAULT_STRATEGIES = {
     "zn_CN-k-pcet-3.00-ff": "correct",
     "zh_CN-k-pcet-3.00-ff": "correct",
     "spcptnl-2.01-ff": "correct",
-    "zn_CN-spcptnl-2.01-ff": "correct",
-    "zh_CN-spcptnl-2.01-ff": "correct",
+   # "zn_CN-spcptnl-2.01-ff": "correct",
+    #"zh_CN-spcptnl-2.01-ff": "correct",
     "zn_CN-k-svolt-3.01-ff": "random",
     "zh_CN-k-svolt-3.01-ff": "random",
     "k-svolt-3.01-ff": "random",
