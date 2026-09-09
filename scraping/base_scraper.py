@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import time
 from datetime import datetime
 from pathlib import Path
@@ -15,8 +16,8 @@ from auth.login import selenium_login as _base_selenium_login
 from core.driver_factory import build_chrome_driver
 
 
-RESULTS_URL = "https://penncnp-dev.pmacs.upenn.edu/results.pl?op=view_sessions&adminid=mruganks"
-LOGIN_URL = "https://penncnp-dev.pmacs.upenn.edu/assessments.pl"
+RESULTS_URL = "https://penncnp.pmacs.upenn.edu/results.pl?op=view_sessions&adminid=mruganks"
+LOGIN_URL = "https://penncnp.pmacs.upenn.edu/assessments.pl"
 
 
 # ---------------------------------------------------------------------
@@ -308,6 +309,113 @@ def open_scores_page(driver, subid):
 
 def _normalize_score_name(score_name: str):
     return score_name.strip().split("(")[0].strip()
+
+
+def collect_all_score_rows_from_open_page(driver):
+    """
+    Collect every visible score row from the already-open ListScores page.
+
+    This intentionally collects more than the configured target score names.
+    Use all_scores_raw.csv / all_scores_raw.json to discover the exact score
+    labels exposed by PennCNB, then copy the confirmed labels into
+    scraping/results_config.py.
+    """
+    raw_rows = []
+
+    rows = driver.find_elements(By.CSS_SELECTOR, "tr.row1, tr.row2")
+
+    for row_index, row in enumerate(rows, start=1):
+        cells = row.find_elements(By.TAG_NAME, "td")
+        cell_texts = [cell.text.strip() for cell in cells]
+
+        if not any(cell_texts):
+            continue
+
+        raw_score_name = cell_texts[0] if len(cell_texts) >= 1 else ""
+        score_name = _normalize_score_name(raw_score_name) if raw_score_name else ""
+        score_value = cell_texts[1] if len(cell_texts) >= 2 else ""
+
+        raw_rows.append({
+            "row_index": row_index,
+            "raw_score_name": raw_score_name,
+            "score_name": score_name,
+            "score_value": score_value,
+            "all_cells": cell_texts,
+        })
+
+    return raw_rows
+
+
+def _raw_score_dump_paths(output_dir=None):
+    if output_dir is None:
+        output_dir = Path.cwd()
+    else:
+        output_dir = Path(output_dir)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    return {
+        "csv_file": output_dir / "all_scores_raw.csv",
+        "json_file": output_dir / "all_scores_raw.json",
+    }
+
+
+def write_raw_score_dump(raw_rows, subid, output_dir=None):
+    """
+    Write every visible score row to all_scores_raw.csv and all_scores_raw.json.
+
+    These files are discovery/debug artifacts. They do not replace the normal
+    per-test CSV files.
+    """
+    paths = _raw_score_dump_paths(output_dir)
+    csv_path = paths["csv_file"]
+    json_path = paths["json_file"]
+
+    timestamp = datetime.now().isoformat()
+
+    fieldnames = [
+        "timestamp",
+        "subid",
+        "row_index",
+        "raw_score_name",
+        "score_name",
+        "score_value",
+        "all_cells",
+    ]
+
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for row in raw_rows:
+            writer.writerow({
+                "timestamp": timestamp,
+                "subid": subid,
+                "row_index": row.get("row_index", ""),
+                "raw_score_name": row.get("raw_score_name", ""),
+                "score_name": row.get("score_name", ""),
+                "score_value": row.get("score_value", ""),
+                "all_cells": json.dumps(row.get("all_cells", []), ensure_ascii=False),
+            })
+
+    payload = {
+        "timestamp": timestamp,
+        "subid": subid,
+        "row_count": len(raw_rows),
+        "rows": raw_rows,
+    }
+
+    with json_path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+    print(f"Wrote raw score CSV to {csv_path}")
+    print(f"Wrote raw score JSON to {json_path}")
+
+    return {
+        "csv_file": str(csv_path),
+        "json_file": str(json_path),
+        "row_count": len(raw_rows),
+    }
 
 
 def collect_scores_from_open_page(driver, config):
@@ -625,6 +733,24 @@ def run_configured_battery_scraper(
 
         try:
             open_scores_page(driver, subid)
+
+            raw_rows = collect_all_score_rows_from_open_page(driver)
+            raw_dump = write_raw_score_dump(
+                raw_rows=raw_rows,
+                subid=subid,
+                output_dir=output_dir,
+            )
+
+            scraped.append({
+                "test_name": "__all_scores_raw__",
+                "status": "INFO",
+                "scrape_status": "RAW_SCORE_DUMP_WRITTEN",
+                "scores": {},
+                "csv_file": raw_dump["csv_file"],
+                "json_file": raw_dump["json_file"],
+                "row_count": raw_dump["row_count"],
+            })
+
         except Exception as exc:
             print(f"Failed to open score page: {exc}")
 
