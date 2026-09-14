@@ -6,10 +6,11 @@ Behavior:
 - Dispatches to the correct plugin based on exact test code.
 - If selected-test mode is enabled, skips every unselected test with Ctrl + .
   until it reaches selected test groups/codes.
-- If the test is unknown, logs it as FAIL, saves artifacts, presses Ctrl + .,
+- If the test is unknown, records it as SKIPPED, saves artifacts, presses Ctrl + .,
   and continues the battery if possible.
-- If a known plugin fails or raises an exception, logs it as FAIL, saves artifacts,
+- If a known plugin fails or raises an exception, records it as FAIL, saves artifacts,
   presses Ctrl + ., and continues the battery if possible.
+- Every record includes a human-readable reason.
 - After a known test completes successfully, briefly checks for:
     1. inter-test go.png link
     2. direct next p.test-name landing page
@@ -32,13 +33,15 @@ from tests_catalog.common import TestRunResult
 from tests_catalog.registry import TEST_REGISTRY, DEFAULT_STRATEGIES
 
 
+PASS_STATUS = "PASS"
 FAIL_STATUS = "FAIL"
-SKIP_STATUS = "SKIP"
+SKIP_STATUS = "SKIPPED"
 
-UNKNOWN_TEST_ERROR = "Unknown test code; skipped with Ctrl+."
+UNKNOWN_TEST_ERROR = "Test does not exist in TEST_REGISTRY; skipped with Ctrl+."
 PLUGIN_FAIL_SKIP_ERROR = "Known plugin failed; skipped with Ctrl+."
 PLUGIN_EXCEPTION_SKIP_ERROR = "Known plugin raised exception; skipped with Ctrl+."
 UNSELECTED_TEST_SKIP_ERROR = "Not in selected test list; skipped with Ctrl+."
+LANDING_CONTINUE_ERROR = "Failed to click landing Continue; skipped with Ctrl+."
 
 GO_LINK = (By.XPATH, "//a[.//img[contains(@src, 'go.png')]]")
 QUIT_LINK = (By.XPATH, "//a[contains(@href, 'op=Quit') or .//img[contains(@src, 'stop.png')]]")
@@ -65,10 +68,6 @@ def _page_has_go(ctx) -> bool:
 
 def _page_has_quit(ctx) -> bool:
     return bool(_safe_find(ctx, QUIT_LINK))
-
-
-def _page_has_next_test_text(ctx) -> bool:
-    return bool(_safe_find(ctx, NEXT_TEST_TEXT))
 
 
 def _page_has_test_landing(ctx) -> bool:
@@ -122,69 +121,119 @@ def _capture_failure_artifact(ctx, name: str, payload: dict[str, Any]) -> None:
         ctx.logger.warning(f"Could not capture failure artifact {name}: {exc}")
 
 
+def _ensure_completed_tests(ctx) -> None:
+    if not hasattr(ctx, "completed_tests") or ctx.completed_tests is None:
+        ctx.completed_tests = []
+
+
+def _append_record(ctx, record: dict[str, Any]) -> dict[str, Any]:
+    _ensure_completed_tests(ctx)
+    ctx.completed_tests.append(record)
+    return record
+
+
+def _reason_from_errors(errors: list[str], fallback: str) -> str:
+    cleaned = [str(error).strip() for error in errors or [] if str(error).strip()]
+    if cleaned:
+        return "; ".join(cleaned)
+    return fallback
+
+
+def _mark_registry(ctx, exact_code: str, status: str, errors: list[str]) -> None:
+    try:
+        ctx.registry.mark_test_completed(ctx.subid, exact_code, status, errors)
+    except Exception as exc:
+        ctx.logger.warning(f"Could not mark test in registry: {exact_code}, status={status}, error={exc}")
+
+
 def _record_failed_test(
     ctx,
     exact_code: str,
     errors: list[str],
+    *,
+    reason: str | None = None,
     skipped: bool = True,
     scrape: bool = False,
+    strategy: str | None = None,
+    skip_reason: str | None = None,
 ) -> dict[str, Any]:
-    """Record a failed/skipped test and do not scrape it by default."""
+    """Record a failed test and do not scrape it by default."""
+    errors = [str(error) for error in (errors or [])]
     record = {
         "test_name": exact_code,
         "status": FAIL_STATUS,
+        "reason": reason or _reason_from_errors(errors, "Test failed."),
         "errors": errors,
         "skipped": skipped,
         "skip_method": "ctrl_period" if skipped else None,
+        "skip_reason": skip_reason,
         "scrape": scrape,
+        "strategy": strategy,
     }
 
-    ctx.completed_tests.append(record)
-    ctx.registry.mark_test_completed(ctx.subid, exact_code, FAIL_STATUS, errors)
+    _append_record(ctx, record)
+    _mark_registry(ctx, exact_code, FAIL_STATUS, errors)
     return record
 
 
-def _record_completed_test(ctx, exact_code: str, result) -> dict[str, Any]:
-    """Record a known administered test."""
+def _record_completed_test(ctx, exact_code: str, result, *, strategy: str | None = None) -> dict[str, Any]:
+    """Record a known administered test that passed."""
+    errors = [str(error) for error in (getattr(result, "errors", []) or [])]
     record = {
         "test_name": exact_code,
-        "status": result.status,
-        "errors": result.errors,
+        "status": getattr(result, "status", PASS_STATUS),
+        "reason": "Completed successfully.",
+        "errors": errors,
         "skipped": False,
         "skip_method": None,
+        "skip_reason": None,
         "scrape": True,
+        "strategy": strategy,
     }
 
-    ctx.completed_tests.append(record)
-    ctx.registry.mark_test_completed(ctx.subid, exact_code, result.status, result.errors)
+    _append_record(ctx, record)
+    _mark_registry(ctx, exact_code, record["status"], errors)
+    return record
+
+
+def _record_skipped_test(
+    ctx,
+    exact_code: str,
+    errors: list[str],
+    *,
+    reason: str,
+    skip_reason: str,
+    strategy: str | None = None,
+) -> dict[str, Any]:
+    """Record a skipped test."""
+    errors = [str(error) for error in (errors or [])]
+    record = {
+        "test_name": exact_code,
+        "status": SKIP_STATUS,
+        "reason": reason,
+        "errors": errors,
+        "skipped": True,
+        "skip_method": "ctrl_period",
+        "skip_reason": skip_reason,
+        "scrape": False,
+        "strategy": strategy,
+    }
+
+    _append_record(ctx, record)
+    _mark_registry(ctx, exact_code, SKIP_STATUS, errors)
     return record
 
 
 def _record_skipped_unselected_test(ctx, exact_code: str) -> dict[str, Any]:
     """Record a test intentionally skipped because it was not selected."""
-    record = {
-        "test_name": exact_code,
-        "status": SKIP_STATUS,
-        "errors": [UNSELECTED_TEST_SKIP_ERROR],
-        "skipped": True,
-        "skip_method": "ctrl_period",
-        "scrape": False,
-        "skip_reason": "not_selected",
-    }
-
-    ctx.completed_tests.append(record)
-
-    try:
-        ctx.registry.mark_test_completed(
-            ctx.subid,
-            exact_code,
-            SKIP_STATUS,
-            [UNSELECTED_TEST_SKIP_ERROR],
-        )
-    except Exception as exc:
-        ctx.logger.warning(f"Could not mark unselected skipped test in registry: {exc}")
-
-    return record
+    selected = _selected_test_tokens(ctx)
+    return _record_skipped_test(
+        ctx,
+        exact_code,
+        [UNSELECTED_TEST_SKIP_ERROR],
+        reason=f"Skipped because this test was not selected for this run. Selected tokens: {selected}.",
+        skip_reason="not_selected",
+    )
 
 
 def _generic_group_name(exact_code: str) -> str:
@@ -325,9 +374,9 @@ def _skip_unknown_test(ctx, exact_code: str) -> dict[str, Any]:
     """
     Unknown test behavior:
     - Capture artifacts.
-    - Mark the unknown test as FAIL.
+    - Record as SKIPPED because no plugin is registered for this code.
     - Press Ctrl + . to skip.
-    - Return the failure record.
+    - Return the skipped record.
     """
     ctx.logger.error(f"Unknown test encountered: {exact_code}")
 
@@ -336,11 +385,18 @@ def _skip_unknown_test(ctx, exact_code: str) -> dict[str, Any]:
         f"unknown_test_{exact_code}",
         {
             "exact_code": exact_code,
-            "action": "mark_failed_and_skip_with_ctrl_period",
+            "action": "record_skipped_and_skip_with_ctrl_period",
+            "reason": UNKNOWN_TEST_ERROR,
         },
     )
 
-    record = _record_failed_test(ctx, exact_code, [UNKNOWN_TEST_ERROR], skipped=True, scrape=False)
+    record = _record_skipped_test(
+        ctx,
+        exact_code,
+        [UNKNOWN_TEST_ERROR],
+        reason=f"Skipped because {exact_code} does not exist in TEST_REGISTRY.",
+        skip_reason="not_in_registry",
+    )
     _send_ctrl_period(ctx)
     return record
 
@@ -397,7 +453,7 @@ def _run_plugin_safely(ctx, exact_code: str, plugin, strategy: str):
 
 
 def _result_failed(result) -> bool:
-    return getattr(result, "status", None) != "PASS"
+    return getattr(result, "status", None) != PASS_STATUS
 
 
 def run_battery(ctx, registry=None):
@@ -412,14 +468,15 @@ def run_battery(ctx, registry=None):
       - exact code, e.g. zn_CN-k-pcet-3.00-ff
       - fallback substring match
 
-    Unknown tests are marked FAIL, skipped with Ctrl+., and the battery continues
+    Unknown tests are marked SKIPPED, skipped with Ctrl+., and the battery continues
     when possible.
 
-    Known tests that return FAIL or raise exceptions are also marked FAIL, skipped
+    Known tests that return FAIL or raise exceptions are marked FAIL, skipped
     with Ctrl+., and the battery continues when possible.
     """
     registry = registry or TEST_REGISTRY
     completed = []
+    _ensure_completed_tests(ctx)
 
     while True:
         landing = TestLandingPage(ctx)
@@ -456,17 +513,16 @@ def run_battery(ctx, registry=None):
         except Exception as exc:
             ctx.logger.exception(f"{exact_code}: failed to click landing continue")
 
-            result = TestRunResult(
-                status=FAIL_STATUS,
-                errors=[f"Failed to click landing continue: {exc}"],
-            )
-
+            errors = [f"{LANDING_CONTINUE_ERROR} {exc}"]
             record = _record_failed_test(
                 ctx,
                 exact_code,
-                result.errors,
+                errors,
+                reason=f"Failed to click landing Continue: {exc}",
                 skipped=True,
                 scrape=False,
+                strategy=strategy,
+                skip_reason="landing_continue_failed",
             )
             completed.append(record)
 
@@ -475,7 +531,7 @@ def run_battery(ctx, registry=None):
                 f"landing_continue_failure_{exact_code}",
                 {
                     "exact_code": exact_code,
-                    "errors": result.errors,
+                    "errors": errors,
                     "action": "skip_after_landing_continue_failure",
                 },
             )
@@ -503,8 +559,14 @@ def run_battery(ctx, registry=None):
                 ctx,
                 exact_code,
                 failed_result.errors,
+                reason=_reason_from_errors(
+                    failed_result.errors,
+                    f"Known plugin for {exact_code} returned FAIL.",
+                ),
                 skipped=True,
                 scrape=False,
+                strategy=strategy,
+                skip_reason="plugin_failed",
             )
             completed.append(record)
 
@@ -516,10 +578,10 @@ def run_battery(ctx, registry=None):
 
             break
 
-        record = _record_completed_test(ctx, exact_code, result)
+        record = _record_completed_test(ctx, exact_code, result, strategy=strategy)
         completed.append(record)
 
-        ctx.logger.info(f"Completed {exact_code}: {result.status}")
+        ctx.logger.info(f"Completed {exact_code}: {record['status']}")
 
         if _advance_after_test(ctx):
             continue
