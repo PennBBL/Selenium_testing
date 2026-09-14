@@ -271,9 +271,6 @@ def completed_summary_rows(
             "status": normalize_status(record.get("status")),
             "reason": record_reason(record),
             "errors": json.dumps(errors, ensure_ascii=False),
-            "skipped": str(bool(record.get("skipped", False))),
-            "skip_method": record.get("skip_method") or "",
-            "skip_reason": record.get("skip_reason") or "",
             "scrape": str(bool(record.get("scrape", False))),
             "strategy": record.get("strategy") or "",
         })
@@ -296,9 +293,6 @@ def write_summary_csv(path: Path, rows: list[dict]) -> None:
         "status",
         "reason",
         "errors",
-        "skipped",
-        "skip_method",
-        "skip_reason",
         "scrape",
         "strategy",
     ]
