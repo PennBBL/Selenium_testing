@@ -303,6 +303,61 @@ def open_scores_page(driver, subid):
     time.sleep(1)
 
 
+def extract_dataset_id(driver):
+    """
+    Extract datasetid from the open results/session score page.
+
+    Preferred source:
+        <input type="hidden" name="datasetid" value="...">
+
+    Fallback:
+        Test Information table row with "Dataset ID:".
+    """
+    try:
+        dataset_input = driver.find_element(By.NAME, "datasetid")
+        datasetid = (dataset_input.get_attribute("value") or "").strip()
+        if datasetid:
+            return datasetid
+    except Exception:
+        pass
+
+    try:
+        rows = driver.find_elements(By.XPATH, "//tr")
+        for row in rows:
+            cells = [
+                cell.text.strip()
+                for cell in row.find_elements(By.XPATH, "./th|./td")
+            ]
+            for idx, cell_text in enumerate(cells):
+                normalized = cell_text.rstrip(":").strip().lower()
+                if normalized == "dataset id" and idx + 1 < len(cells):
+                    datasetid = cells[idx + 1].strip()
+                    if datasetid:
+                        return datasetid
+    except Exception:
+        pass
+
+    return None
+
+
+def get_datasetid_for_subid(subid, browser="chrome", headless=False):
+    """
+    Open the results page for a subid and return datasetid only.
+
+    This intentionally does not scrape or write score files. It reuses the same
+    login/session navigation as score scraping, then extracts datasetid from the
+    score page.
+    """
+    driver = build_chrome_driver()
+
+    try:
+        do_login(driver, LOGIN_URL, RESULTS_URL)
+        open_scores_page(driver, subid)
+        return extract_dataset_id(driver)
+    finally:
+        driver.quit()
+
+
 # ---------------------------------------------------------------------
 # Score collection
 # ---------------------------------------------------------------------
@@ -733,6 +788,7 @@ def run_configured_battery_scraper(
 
         try:
             open_scores_page(driver, subid)
+            datasetid = extract_dataset_id(driver)
 
             raw_rows = collect_all_score_rows_from_open_page(driver)
             raw_dump = write_raw_score_dump(
@@ -749,6 +805,7 @@ def run_configured_battery_scraper(
                 "csv_file": raw_dump["csv_file"],
                 "json_file": raw_dump["json_file"],
                 "row_count": raw_dump["row_count"],
+                "datasetid": datasetid,
             })
 
         except Exception as exc:
