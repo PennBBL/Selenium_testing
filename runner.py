@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import os
 import re
@@ -31,6 +32,11 @@ from workflows.launch_battery import launch_battery
 from workflows.run_battery import run_battery
 from workflows.scrape_completed_tests import scrape_completed_tests
 
+try:
+    from scraping.base_scraper import get_datasetid_for_subid
+except Exception:
+    get_datasetid_for_subid = None
+
 
 BROWSER_CHOICES = {
     "1": "chrome",
@@ -42,6 +48,10 @@ BROWSER_CHOICES = {
     "edge": "edge",
     "msedge": "edge",
 }
+
+
+SUMMARY_CSV_NAME = "completed_tests_summary.csv"
+INDIVIDUAL_STATUS_DIR = "test_status"
 
 
 def prompt_required(label: str) -> str:
@@ -180,6 +190,234 @@ def resolve_headless() -> bool:
     return not bool(os.getenv("DISPLAY"))
 
 
+def score_scraping_enabled() -> bool:
+    """
+    Score scraping is disabled by default for now.
+
+    Future behavior can be restored without changing code by setting:
+        SCRAPE_RESULTS=1
+    """
+    return bool(env_bool("SCRAPE_RESULTS", default=False))
+
+
+def sanitize_folder_part(value) -> str:
+    value = str(value or "").strip().replace(" ", "_")
+    value = re.sub(r"[^A-Za-z0-9_.-]+", "_", value)
+    value = re.sub(r"_+", "_", value)
+    return value.strip("_") or "unknown"
+
+
+def sanitize_file_part(value) -> str:
+    return sanitize_folder_part(value)
+
+
+def normalize_status(status) -> str:
+    status = str(status or "UNKNOWN").strip().upper()
+    if status in {"SKIP", "SKIPPED"}:
+        return "SKIPPED"
+    return status
+
+
+def record_reason(record: dict) -> str:
+    reason = str(record.get("reason") or "").strip()
+    if reason:
+        return reason
+
+    errors = record.get("errors") or []
+    if isinstance(errors, list) and errors:
+        return "; ".join(str(error) for error in errors if str(error).strip())
+
+    status = normalize_status(record.get("status"))
+    if status == "PASS":
+        return "Completed successfully."
+    if status == "SKIPPED":
+        return "Skipped."
+    if status == "FAIL":
+        return "Failed."
+    return "No reason recorded."
+
+
+def completed_summary_rows(
+    completed_tests: list[dict],
+    *,
+    run_date: str,
+    datasetid: str | None,
+    subid: str,
+    battery_code: str,
+    browser: str,
+    headless: bool,
+    run_scope: str,
+    selected_test_tokens: list[str],
+) -> list[dict]:
+    rows = []
+    selected_text = ",".join(selected_test_tokens or [])
+
+    for index, record in enumerate(completed_tests, start=1):
+        errors = record.get("errors") or []
+        if not isinstance(errors, list):
+            errors = [str(errors)]
+
+        rows.append({
+            "run_date": run_date,
+            "datasetid": datasetid or "",
+            "subid": subid,
+            "battery_code": battery_code,
+            "browser": browser,
+            "headless": str(bool(headless)),
+            "run_scope": run_scope,
+            "selected_test_tokens": selected_text,
+            "order": index,
+            "test_name": record.get("test_name", ""),
+            "status": normalize_status(record.get("status")),
+            "reason": record_reason(record),
+            "errors": json.dumps(errors, ensure_ascii=False),
+            "skipped": str(bool(record.get("skipped", False))),
+            "skip_method": record.get("skip_method") or "",
+            "skip_reason": record.get("skip_reason") or "",
+            "scrape": str(bool(record.get("scrape", False))),
+            "strategy": record.get("strategy") or "",
+        })
+
+    return rows
+
+
+def write_summary_csv(path: Path, rows: list[dict]) -> None:
+    fieldnames = [
+        "run_date",
+        "datasetid",
+        "subid",
+        "battery_code",
+        "browser",
+        "headless",
+        "run_scope",
+        "selected_test_tokens",
+        "order",
+        "test_name",
+        "status",
+        "reason",
+        "errors",
+        "skipped",
+        "skip_method",
+        "skip_reason",
+        "scrape",
+        "strategy",
+    ]
+
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def write_individual_status_files(output_dir: Path, rows: list[dict]) -> None:
+    status_dir = output_dir / INDIVIDUAL_STATUS_DIR
+    status_dir.mkdir(parents=True, exist_ok=True)
+
+    for row in rows:
+        order = str(row.get("order") or "0").zfill(2)
+        test_name = sanitize_file_part(row.get("test_name") or "unknown_test")
+        path = status_dir / f"{order}_{test_name}.json"
+        path.write_text(json.dumps(row, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def write_run_outputs(
+    output_dir: Path,
+    completed_tests: list[dict],
+    *,
+    run_date: str,
+    datasetid: str | None,
+    subid: str,
+    battery_code: str,
+    browser: str,
+    headless: bool,
+    run_scope: str,
+    selected_test_tokens: list[str],
+    dataset_lookup_error: str | None = None,
+) -> dict:
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    metadata = {
+        "run_date": run_date,
+        "datasetid": datasetid,
+        "subid": subid,
+        "battery_code": battery_code,
+        "browser": browser,
+        "headless": bool(headless),
+        "run_scope": run_scope,
+        "selected_test_tokens": selected_test_tokens,
+        "score_scraping_enabled": score_scraping_enabled(),
+        "dataset_lookup_error": dataset_lookup_error,
+        "output_dir": str(output_dir),
+    }
+
+    rows = completed_summary_rows(
+        completed_tests,
+        run_date=run_date,
+        datasetid=datasetid,
+        subid=subid,
+        battery_code=battery_code,
+        browser=browser,
+        headless=headless,
+        run_scope=run_scope,
+        selected_test_tokens=selected_test_tokens,
+    )
+
+    completed_path = output_dir / "completed_tests.json"
+    completed_path.write_text(
+        json.dumps(completed_tests, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    metadata_path = output_dir / "run_metadata.json"
+    metadata_path.write_text(
+        json.dumps(metadata, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    summary_path = output_dir / SUMMARY_CSV_NAME
+    write_summary_csv(summary_path, rows)
+
+    write_individual_status_files(output_dir, rows)
+
+    return {
+        "metadata": metadata,
+        "rows": rows,
+        "completed_path": completed_path,
+        "metadata_path": metadata_path,
+        "summary_path": summary_path,
+    }
+
+
+def final_output_dir_for(output_root: Path, datasetid: str | None, run_date: str, subid: str) -> Path:
+    dataset_part = sanitize_folder_part(datasetid or "datasetid_unknown")
+    date_part = sanitize_folder_part(run_date)
+    subid_part = sanitize_folder_part(subid)
+
+    base = output_root / f"{dataset_part}_{date_part}_{subid_part}"
+
+    if not base.exists():
+        return base
+
+    suffix = 2
+    while True:
+        candidate = output_root / f"{dataset_part}_{date_part}_{subid_part}_{suffix}"
+        if not candidate.exists():
+            return candidate
+        suffix += 1
+
+
+def rename_output_dir(current_output_dir: Path, final_output_dir: Path) -> Path:
+    current_output_dir = Path(current_output_dir)
+    final_output_dir = Path(final_output_dir)
+
+    if current_output_dir.resolve() == final_output_dir.resolve():
+        return current_output_dir
+
+    final_output_dir.parent.mkdir(parents=True, exist_ok=True)
+    current_output_dir.rename(final_output_dir)
+    return final_output_dir
+
+
 def build_session_context(
     driver,
     wait,
@@ -211,10 +449,26 @@ def build_session_context(
         return SessionContext(**base_kwargs)
 
 
+def lookup_datasetid(subid: str, logger) -> tuple[str | None, str | None]:
+    if get_datasetid_for_subid is None:
+        return None, "get_datasetid_for_subid is not available from scraping.base_scraper."
+
+    try:
+        datasetid = get_datasetid_for_subid(subid=subid)
+        if datasetid:
+            logger.info("Dataset ID found: %s", datasetid)
+            return str(datasetid), None
+        return None, "Dataset ID was not found on the results page."
+    except Exception as exc:
+        logger.exception("Dataset ID lookup failed: %s", exc)
+        return None, str(exc)
+
+
 def main():
     print("=" * 70)
     print("PENN CNB BATTERY RUNNER")
     print("Browser-selectable, selected-test capable, headless-capable")
+    print("Score scraping disabled by default; status summary enabled")
     print("=" * 70)
 
     browser = choose_browser()
@@ -223,6 +477,7 @@ def main():
     run_scope, selected_test_tokens = prompt_run_scope()
 
     headless = resolve_headless()
+    run_date = datetime.now().strftime("%Y%m%d")
 
     print()
     print(f"Browser: {browser}")
@@ -232,10 +487,12 @@ def main():
     print(f"Run scope: {run_scope}")
     if run_scope == "selected":
         print(f"Selected test(s): {', '.join(selected_test_tokens)}")
+    print(f"Score scraping enabled: {score_scraping_enabled()}")
     print()
 
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = Path("output") / f"{run_id}_{subid}"
+    temp_run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_root = Path("output")
+    output_dir = output_root / f"_tmp_{temp_run_id}_{sanitize_folder_part(subid)}"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     logger = setup_logging(output_dir)
@@ -246,7 +503,8 @@ def main():
     logger.info("Battery code: %s", battery_code)
     logger.info("Run scope: %s", run_scope)
     logger.info("Selected test tokens: %s", selected_test_tokens)
-    logger.info("Output directory: %s", output_dir)
+    logger.info("Temporary output directory: %s", output_dir)
+    logger.info("Score scraping enabled: %s", score_scraping_enabled())
 
     driver = None
     artifacts = None
@@ -280,13 +538,20 @@ def main():
         launch_battery(ctx)
         completed_tests = run_battery(ctx)
 
-        completed_path = output_dir / "completed_tests.json"
-        completed_path.write_text(
-            json.dumps(completed_tests, indent=2, ensure_ascii=False),
-            encoding="utf-8",
+        # Preliminary files, in case dataset lookup or rename fails.
+        write_run_outputs(
+            output_dir,
+            completed_tests,
+            run_date=run_date,
+            datasetid=None,
+            subid=subid,
+            battery_code=battery_code,
+            browser=browser,
+            headless=headless,
+            run_scope=run_scope,
+            selected_test_tokens=selected_test_tokens,
         )
 
-        logger.info("Completed tests written to %s", completed_path)
         logger.info("Battery completed. Waiting 5 seconds before closing test browser...")
         time.sleep(5)
 
@@ -314,11 +579,47 @@ def main():
                 pass
 
     if ctx is None:
-        raise RuntimeError("Session context was not created; cannot scrape results.")
+        raise RuntimeError("Session context was not created; cannot finalize results.")
 
-    logger.info("Starting scraping for completed tests...")
+    logger.info("Looking up dataset ID for output folder name...")
+    datasetid, dataset_lookup_error = lookup_datasetid(subid, logger)
 
-    scrape_results = scrape_completed_tests(ctx, completed_tests)
+    final_dir = final_output_dir_for(output_root, datasetid, run_date, subid)
+    output_dir = rename_output_dir(output_dir, final_dir)
+
+    ctx.output_dir = output_dir
+    logger.info("Final output directory: %s", output_dir)
+
+    outputs = write_run_outputs(
+        output_dir,
+        completed_tests,
+        run_date=run_date,
+        datasetid=datasetid,
+        subid=subid,
+        battery_code=battery_code,
+        browser=browser,
+        headless=headless,
+        run_scope=run_scope,
+        selected_test_tokens=selected_test_tokens,
+        dataset_lookup_error=dataset_lookup_error,
+    )
+
+    logger.info("Completed tests written to %s", outputs["completed_path"])
+    logger.info("Run metadata written to %s", outputs["metadata_path"])
+    logger.info("Summary CSV written to %s", outputs["summary_path"])
+
+    if score_scraping_enabled():
+        logger.info("Starting score scraping for completed tests because SCRAPE_RESULTS=1...")
+        scrape_results = scrape_completed_tests(ctx, completed_tests)
+    else:
+        logger.info("Score scraping skipped because SCRAPE_RESULTS is not enabled.")
+        scrape_results = [{
+            "test_name": "__score_scraping__",
+            "status": "SKIPPED",
+            "scrape_status": "SKIPPED_BY_CONFIG",
+            "reason": "Score scraping is currently disabled. Set SCRAPE_RESULTS=1 to enable it later.",
+            "datasetid": datasetid,
+        }]
 
     scrape_path = output_dir / "scrape_results.json"
     scrape_path.write_text(
@@ -327,7 +628,6 @@ def main():
     )
 
     logger.info("Scrape results written to %s", scrape_path)
-    logger.info("Scrape results: %s", scrape_results)
     logger.info("All done.")
 
 
