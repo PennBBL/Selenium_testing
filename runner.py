@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import platform
 import re
 import time
 from datetime import datetime
@@ -188,6 +189,31 @@ def resolve_headless() -> bool:
         return bool(env_headless)
 
     return not bool(os.getenv("DISPLAY"))
+    
+def get_runtime_environment(driver) -> dict:
+    caps = getattr(driver, "capabilities", {}) or {}
+
+    browser_name = (
+        caps.get("browserName")
+        or caps.get("browser")
+        or "unknown"
+    )
+
+    browser_version = (
+        caps.get("browserVersion")
+        or caps.get("version")
+        or "unknown"
+    )
+
+    os_name = platform.system() or "unknown"
+    os_version = platform.release() or "unknown"
+
+    return {
+        "browser_name": browser_name,
+        "browser_version": browser_version,
+        "os_name": os_name,
+        "os_version": os_version,
+    }
 
 
 def score_scraping_enabled() -> bool:
@@ -247,6 +273,10 @@ def completed_summary_rows(
     browser: str,
     headless: bool,
     run_scope: str,
+    browser_name: str,
+    browser_version: str,
+    os_name: str,
+    os_version: str,
     selected_test_tokens: list[str],
 ) -> list[dict]:
     rows = []
@@ -263,6 +293,10 @@ def completed_summary_rows(
             "subid": subid,
             "battery_code": battery_code,
             "browser": browser,
+            "browser_name": browser_name,
+            "browser_version": browser_version,
+            "os_name": os_name,
+            "os_version": os_version,
             "headless": str(bool(headless)),
             "run_scope": run_scope,
             "selected_test_tokens": selected_text,
@@ -285,6 +319,10 @@ def write_summary_csv(path: Path, rows: list[dict]) -> None:
         "subid",
         "battery_code",
         "browser",
+        "browser_name",
+        "browser_version",
+        "os_name",
+        "os_version",
         "headless",
         "run_scope",
         "selected_test_tokens",
@@ -326,6 +364,10 @@ def write_run_outputs(
     headless: bool,
     run_scope: str,
     selected_test_tokens: list[str],
+    browser_name: str = "",
+    browser_version: str = "",
+    os_name: str = "",
+    os_version: str = "",
     dataset_lookup_error: str | None = None,
 ) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -336,6 +378,10 @@ def write_run_outputs(
         "subid": subid,
         "battery_code": battery_code,
         "browser": browser,
+        "browser_name": browser_name,
+        "browser_version": browser_version,
+        "os_name": os_name,
+        "os_version": os_version,
         "headless": bool(headless),
         "run_scope": run_scope,
         "selected_test_tokens": selected_test_tokens,
@@ -351,6 +397,10 @@ def write_run_outputs(
         subid=subid,
         battery_code=battery_code,
         browser=browser,
+        browser_name=browser_name,
+        browser_version=browser_version,
+        os_name=os_name,
+        os_version=os_version,
         headless=headless,
         run_scope=run_scope,
         selected_test_tokens=selected_test_tokens,
@@ -505,8 +555,16 @@ def main():
     ctx = None
     completed_tests = []
 
+    runtime_env = {
+        "browser_name": "",
+        "browser_version": "",
+        "os_name": platform.system() or "unknown",
+        "os_version": platform.release() or "unknown",
+    }
+
     try:
         driver = build_driver(browser=browser, headless=headless)
+        runtime_env = get_runtime_environment(driver)
         wait = Waits(driver)
         artifacts = ArtifactManager(driver, output_dir)
 
@@ -592,6 +650,10 @@ def main():
         subid=subid,
         battery_code=battery_code,
         browser=browser,
+        browser_name=runtime_env["browser_name"],
+        browser_version=runtime_env["browser_version"],
+        os_name=runtime_env["os_name"],
+        os_version=runtime_env["os_version"],
         headless=headless,
         run_scope=run_scope,
         selected_test_tokens=selected_test_tokens,
