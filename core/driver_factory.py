@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import os
 import shutil
-
 from pathlib import Path
-from selenium.webdriver.edge.service import Service as EdgeService
+
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options as ChromeOptions
 from selenium.webdriver.edge.options import Options as EdgeOptions
+from selenium.webdriver.edge.service import Service as EdgeService
 from selenium.webdriver.firefox.options import Options as FirefoxOptions
 
 
@@ -23,30 +23,15 @@ EDGE_BINARIES = [
     "microsoft-edge-stable",
     "msedge",
 ]
-EDGE_DRIVER_BINARIES = [
-    "./drivers/msedgedriver",
-    "msedgedriver",
-    "/usr/local/bin/msedgedriver",
-    "/usr/bin/msedgedriver",
-]
+
+# Systems-managed EdgeDriver.
+EDGE_DRIVER = "/usr/local/bin/msedgedriver"
 
 FIREFOX_BINARIES = [
     "firefox",
     "firefox-esr",
 ]
 
-def _find_existing_path(candidates):
-    for candidate in candidates:
-        path = Path(candidate)
-
-        if path.exists() and path.is_file():
-            return str(path.resolve())
-
-        found = shutil.which(candidate)
-        if found:
-            return found
-
-    return None
 
 def _env_flag(name: str, default: bool | None = None) -> bool | None:
     value = os.getenv(name)
@@ -85,7 +70,11 @@ def _should_headless(headless: bool | None) -> bool:
 
 
 def _window_size() -> str:
-    return os.getenv("CHROME_WINDOW_SIZE") or os.getenv("BROWSER_WINDOW_SIZE") or "1200,900"
+    return (
+        os.getenv("BROWSER_WINDOW_SIZE")
+        or os.getenv("CHROME_WINDOW_SIZE")
+        or "1200,900"
+    )
 
 
 def _build_chrome_options(headless: bool) -> ChromeOptions:
@@ -116,10 +105,16 @@ def _build_edge_options(headless: bool) -> EdgeOptions:
     if edge_binary:
         options.binary_location = edge_binary
 
+    window_size = (
+        os.getenv("EDGE_WINDOW_SIZE")
+        or os.getenv("BROWSER_WINDOW_SIZE")
+        or "1200,900"
+    )
+
     if headless:
         options.add_argument("--headless=new")
 
-    options.add_argument(f"--window-size={_window_size()}")
+    options.add_argument(f"--window-size={window_size}")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
@@ -147,30 +142,40 @@ def _build_firefox_options(headless: bool) -> FirefoxOptions:
     return options
 
 
+def build_edge_driver(headless: bool | None = None):
+    resolved_headless = _should_headless(headless)
+
+    driver_path = Path(EDGE_DRIVER)
+
+    if not driver_path.exists():
+        raise RuntimeError(
+            f"Systems-managed msedgedriver was not found at {EDGE_DRIVER}"
+        )
+
+    service = EdgeService(executable_path=str(driver_path))
+
+    return webdriver.Edge(
+        service=service,
+        options=_build_edge_options(resolved_headless),
+    )
+
+
 def build_driver(browser: str = "chrome", headless: bool | None = None):
     browser = (browser or "chrome").strip().lower()
     resolved_headless = _should_headless(headless)
 
     if browser in {"chrome", "google-chrome", "chromium"}:
-        return webdriver.Chrome(options=_build_chrome_options(resolved_headless))
-
-    if browser in {"edge", "msedge", "microsoft-edge"}:
-        edge_driver = _find_existing_path(EDGE_DRIVER_BINARIES)
-
-        if not edge_driver:
-            raise RuntimeError(
-                "Edge was selected, but msedgedriver was not found locally. "
-                "Install a matching msedgedriver version and place it at "
-                "./drivers/msedgedriver or somewhere on PATH."
-            )
-
-        return webdriver.Edge(
-            service=EdgeService(executable_path=edge_driver),
-            options=_build_edge_options(resolved_headless),
+        return webdriver.Chrome(
+            options=_build_chrome_options(resolved_headless)
         )
 
+    if browser in {"edge", "msedge", "microsoft-edge"}:
+        return build_edge_driver(headless=resolved_headless)
+
     if browser in {"firefox", "mozilla", "ff"}:
-        return webdriver.Firefox(options=_build_firefox_options(resolved_headless))
+        return webdriver.Firefox(
+            options=_build_firefox_options(resolved_headless)
+        )
 
     raise ValueError(
         f"Unsupported browser: {browser}. "
