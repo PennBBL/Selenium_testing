@@ -90,7 +90,7 @@ DEFAULT_STRATEGIES = {
     "zn_CN-k-pcet-3.00_voice-ff": "correct",
     "zn_CN-k-svolt-3.01_voice-ff": "random",
     "zn_CN-pmat24-a-2.00_voice-ff": "correct",
-    "zn_CN-vsplot24-2.10_voice-ff": "all_correct",,
+    "zn_CN-vsplot24-2.10_voice-ff": "all_correct",
    # "zn_CN-spcptnl-2.01-ff": "correct",
     #"zh_CN-spcptnl-2.01-ff": "correct",
     "zn_CN-k-svolt-3.01-ff": "random",
