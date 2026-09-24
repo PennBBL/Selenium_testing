@@ -52,6 +52,7 @@ TEST_REGISTRY = {
     #"zn_CN-spcptnl-2.01_voice-ff": ZN_SPCPTNLPlugin,
     "zn_CN-k-svolt-3.01-ff": SVOLTPlugin,
     "zn_CN-k-svolt-3.01_voice-ff": SVOLTPlugin,
+    "spllt-a-1.00-ff": SPLLTPlugin,
 
 }
 
@@ -96,4 +97,5 @@ DEFAULT_STRATEGIES = {
     "zn_CN-k-svolt-3.01-ff": "random",
     "zh_CN-k-svolt-3.01-ff": "random",
     "k-svolt-3.01-ff": "random",
+    "spllt-a-1.00-ff": "suite",
 }
