@@ -582,17 +582,32 @@ class PCETPlugin:
 
     def _click_trial_correct(self, ctx, trial):
         response_index = self._correct_response_index(trial)
-
+    
         ctx.logger.info(
             "PCET correct=%s responses=%s -> response index=%s",
             trial["correct"],
             trial["responses"],
             response_index,
         )
-
+    
+        # Human-like response delay.
+        response_delay = random.uniform(0.9, 1.5)
+    
+        ctx.logger.info(
+            "PCET waiting %.2f seconds before correct response",
+            response_delay,
+        )
+    
+        time.sleep(response_delay)
+    
         before = self._canvas_signature(ctx)
         self._click_response_index(ctx, response_index)
-        return self._wait_after_click(ctx, previous_signature=before, timeout=4)
+    
+        return self._wait_after_click(
+            ctx,
+            previous_signature=before,
+            timeout=4,
+        )
 
     def _run_block(self, ctx, block_index, strategy):
         trials = self.BLOCK_TRIALS[block_index]
