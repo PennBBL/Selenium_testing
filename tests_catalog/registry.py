@@ -12,6 +12,7 @@ from tests_catalog.pcet_plugin import PCETPlugin
 from tests_catalog.spcptnl_plugin import SPCPTNLPlugin
 from tests_catalog.zn_spcptnl_plugin import ZN_SPCPTNLPlugin
 from tests_catalog.svolt_plugin import SVOLTPlugin
+from tests_catalog.spllt_plugin import SPLLTPlugin
 
 TEST_REGISTRY = {
     "k-er40-d-4.60-ff": ER40Plugin,
