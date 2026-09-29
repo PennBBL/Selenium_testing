@@ -210,6 +210,25 @@ RESULTS_CONFIGS = {
             # Add confirmed SPCPTNL score names after raw scrape.
         ],
     ),
+
+    "spllt-a-1.00-ff": ResultsConfig(
+        test_name="spllt-a-1.00-ff",
+        csv_file="spllt_results.csv",
+        target_scores=[
+            "SPLLTCOR1",
+            "SPLLTPER1",
+            "SPLLTINT1",
+            "SPLLTCOR2",
+            "SPLLTPER2",
+            "SPLLTINT2",
+            "SPLLTCOR3",
+            "SPLLTPER3",
+            "SPLLTINT3",
+            "SPLLT_CORR",
+            "SPLLT_CORR_WREPEATS",
+            "SPLLT_INT",
+        ],
+    ),
 }
 
 
