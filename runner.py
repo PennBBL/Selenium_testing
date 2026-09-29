@@ -590,6 +590,20 @@ def main():
         launch_battery(ctx)
         completed_tests = run_battery(ctx)
 
+        spllt_scenario_records = getattr(
+            ctx,
+            "spllt_scenario_records",
+            None,
+        )
+
+        if spllt_scenario_records:
+            logger.info(
+                "SPLLT produced %d scenario-level completed-test records.",
+                len(spllt_scenario_records),
+            )
+
+            completed_tests = spllt_scenario_records
+
         # Preliminary files, in case dataset lookup or rename fails.
         write_run_outputs(
             output_dir,
