@@ -21,6 +21,7 @@ from tests_catalog.spllt_scenarios import (
     scenario_sequence,
 )
 from workflows.launch_battery import launch_battery
+from scraping.spllt_scraper import get_datasetids_for_subid
 
 try:
     from scraping.base_scraper import get_datasetid_for_subid
@@ -444,6 +445,99 @@ class SPLLTPlugin:
 
         return None
 
+    def _resolve_suite_datasetids(
+        self,
+        ctx,
+        scenario_records: list[dict],
+        summary: list[dict],
+    ) -> None:
+        """
+        Resolve all SPLLT dataset IDs in one pass after the suite finishes.
+
+        The generic single-dataset lookup always selected the same session for
+        this repeated-subid workflow. Instead, query the complete session list,
+        take the newest N dataset IDs, and map them to the administered SPLLT
+        scenarios in execution order.
+        """
+        administered = [
+            record
+            for record in scenario_records
+            if record.get("scrape", True)
+        ]
+
+        if not administered:
+            return
+
+        try:
+            all_datasetids = get_datasetids_for_subid(ctx.subid)
+        except Exception as exc:
+            ctx.logger.exception(
+                "SPLLT could not enumerate dataset IDs for subid %s: %s",
+                ctx.subid,
+                exc,
+            )
+            return
+
+        ctx.logger.info(
+            "SPLLT session lookup found dataset IDs for %s: %s",
+            ctx.subid,
+            all_datasetids,
+        )
+
+        needed = len(administered)
+
+        if len(all_datasetids) < needed:
+            ctx.logger.warning(
+                "SPLLT expected at least %d dataset IDs for %d administered "
+                "scenarios, but session lookup found only %d. Dataset IDs "
+                "will remain blank rather than being guessed.",
+                needed,
+                needed,
+                len(all_datasetids),
+            )
+            return
+
+        selected = all_datasetids[-needed:]
+
+        ctx.logger.info(
+            "SPLLT mapping newest %d dataset IDs to scenario order: %s",
+            needed,
+            selected,
+        )
+
+        by_strategy = {}
+
+        for record, datasetid in zip(administered, selected):
+            datasetid = str(datasetid)
+            record["datasetid"] = datasetid
+            by_strategy[record.get("strategy")] = datasetid
+
+        for item in summary:
+            strategy = item.get("scenario")
+            if strategy in by_strategy:
+                item["datasetid"] = by_strategy[strategy]
+
+                output = item.get("output")
+                if output:
+                    try:
+                        path = Path(output)
+                        payload = json.loads(path.read_text(encoding="utf-8"))
+                        payload["datasetid"] = by_strategy[strategy]
+                        path.write_text(
+                            json.dumps(
+                                payload,
+                                indent=2,
+                                ensure_ascii=False,
+                            ),
+                            encoding="utf-8",
+                        )
+                    except Exception as exc:
+                        ctx.logger.warning(
+                            "Could not update SPLLT scenario JSON for %s: %s",
+                            strategy,
+                            exc,
+                        )
+
     # ------------------------------------------------------------------
     # Battery restart / artifacts
     # ------------------------------------------------------------------
@@ -563,15 +657,13 @@ class SPLLTPlugin:
         """
         Run every SPLLT scenario.
 
-        The registry strategy can remain "suite" internally. That value is not
-        intended for completed_tests_summary.csv. Instead, this method exposes
-        ctx.spllt_scenario_records, containing one row-worthy record per
-        scenario with strategy=<scenario name> and its own datasetid.
+        The registry strategy remains "suite" internally, but reporting uses
+        one row per scenario. Dataset IDs are resolved in one batch after all
+        scenario administrations finish.
         """
         suite_errors = []
         summary = []
         scenario_records = []
-        seen_datasetids: set[str] = set()
 
         ctx.logger.info(
             "SPLLT functional suite starting with %d scenarios",
@@ -587,10 +679,6 @@ class SPLLTPlugin:
                 len(SPLLT_SCENARIO_ORDER),
                 scenario_name,
             )
-
-            # Try to capture datasetid from the live administration before the
-            # destructor/final navigation removes session information.
-            active_datasetid = self._datasetid_from_active_test_browser(ctx)
 
             scenario_error = None
 
@@ -632,18 +720,10 @@ class SPLLTPlugin:
 
                 time.sleep(1.0)
 
-            # Each scenario is one complete battery administration, so resolve
-            # and store its dataset ID before launching the next battery.
-            datasetid = self._lookup_scenario_datasetid(
-                ctx,
-                seen_datasetids=seen_datasetids,
-                active_datasetid=active_datasetid,
-            )
-
-            if datasetid:
-                seen_datasetids.add(str(datasetid))
-
-            payload["datasetid"] = datasetid
+            # Dataset IDs are intentionally resolved after the entire suite.
+            # The generic one-session lookup cannot distinguish repeated SPLLT
+            # administrations that share the same subid.
+            payload["datasetid"] = None
 
             output_path = self._write_scenario_result(
                 ctx,
@@ -668,7 +748,7 @@ class SPLLTPlugin:
                 ),
                 "scrape": True,
                 "strategy": scenario_name,
-                "datasetid": datasetid,
+                "datasetid": None,
             }
 
             scenario_records.append(record)
@@ -676,12 +756,10 @@ class SPLLTPlugin:
             summary.append({
                 "scenario": scenario_name,
                 "status": scenario_status,
-                "datasetid": datasetid,
+                "datasetid": None,
                 "output": str(output_path),
             })
 
-            # Every scenario is a separate SPLLT administration. The SPLLT
-            # battery contains no subsequent tasks, so relaunch immediately.
             if scenario_index < len(SPLLT_SCENARIO_ORDER) - 1:
                 next_scenario = SPLLT_SCENARIO_ORDER[
                     scenario_index + 1
@@ -702,8 +780,6 @@ class SPLLTPlugin:
                     suite_errors.append(fatal_error)
                     ctx.logger.exception(fatal_error)
 
-                    # Add explicit failed rows for every scenario that could
-                    # not be run, so the summary never silently omits them.
                     remaining = SPLLT_SCENARIO_ORDER[
                         scenario_index + 1:
                     ]
@@ -734,8 +810,13 @@ class SPLLTPlugin:
 
                     break
 
-        # runner.py will replace the generic one-row SPLLT result with these
-        # scenario-level rows.
+        # Resolve all dataset IDs together from the subject's session list.
+        self._resolve_suite_datasetids(
+            ctx,
+            scenario_records,
+            summary,
+        )
+
         ctx.spllt_scenario_records = scenario_records
         ctx.spllt_suite_errors = suite_errors
 
@@ -759,11 +840,8 @@ class SPLLTPlugin:
             encoding="utf-8",
         )
 
-        # Important: scenario PASS/FAIL is carried in
-        # ctx.spllt_scenario_records. Return PASS here so run_battery does not
-        # convert the entire suite into one generic FAIL row or Ctrl+. the
-        # final page merely because one scenario failed.
         return TestRunResult(
             status="PASS",
             errors=[],
         )
+
