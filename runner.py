@@ -289,7 +289,7 @@ def completed_summary_rows(
 
         rows.append({
             "run_date": run_date,
-            "datasetid": datasetid or "",
+            "datasetid": record.get("datasetid") or datasetid or "",
             "subid": subid,
             "battery_code": battery_code,
             "browser": browser,
