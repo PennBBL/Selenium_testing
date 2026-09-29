@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 import csv
+import re
 import time
 from datetime import datetime
 from pathlib import Path
 
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support.ui import WebDriverWait, Select
+from selenium.webdriver.support import expected_conditions as EC
 
 from core.driver_factory import build_chrome_driver
-from scraping.base_scraper import LOGIN_URL, do_login, get_browser_info
+from scraping.base_scraper import (
+    LOGIN_URL,
+    RESULTS_URL,
+    do_login,
+    get_browser_info,
+)
 
 
 SPLLT_TEST_CODE = "spllt-a-1.00-ff"
@@ -30,8 +37,7 @@ SPLLT_SCORE_COLUMNS = [
     "SPLLT_INT",
 ]
 
-BASE_RESULTS_URL = "https://penncnp-dev.pmacs.upenn.edu/results.pl"
-
+BASE_RESULTS_URL = RESULTS_URL.split("?", 1)[0]
 
 CSV_FIELDNAMES = [
     "timestamp",
@@ -71,59 +77,201 @@ def _normalize_score_name(value: str) -> str:
     return str(value or "").strip().split("(")[0].strip()
 
 
-def _dataset_scores_url(datasetid: str) -> str:
-    return (
-        f"{BASE_RESULTS_URL}?op=display_scores"
-        f"&datasetid={datasetid}"
+# ---------------------------------------------------------------------
+# Dataset-ID discovery for SPLLT suites
+# ---------------------------------------------------------------------
+
+
+def _extract_datasetids_from_session_list(driver) -> list[str]:
+    """
+    Extract every dataset ID visible in the session-list page.
+
+    CNB session rows have changed markup over time, so this intentionally
+    checks hidden inputs, ViewSession ancestor forms, and page HTML.
+    """
+    found: set[str] = set()
+
+    # Most reliable case: hidden/form inputs containing datasetid.
+    for element in driver.find_elements(
+        By.CSS_SELECTOR,
+        "input[name='datasetid'], input[name='dataset_id'], "
+        "input[id='datasetid'], input[id='dataset_id']",
+    ):
+        try:
+            value = (element.get_attribute("value") or "").strip()
+            if re.fullmatch(r"\d+", value):
+                found.add(value)
+        except Exception:
+            pass
+
+    # Inspect each View button's form. This helps when the dataset field is
+    # not globally easy to address but lives inside each session row/form.
+    for button in driver.find_elements(
+        By.XPATH,
+        "//input[@name='ViewSession' and @value='View']",
+    ):
+        try:
+            form = button.find_element(By.XPATH, "./ancestor::form[1]")
+            html = form.get_attribute("outerHTML") or ""
+        except Exception:
+            html = ""
+
+        for pattern in (
+            r'name=["\']datasetid["\'][^>]*value=["\'](\d+)["\']',
+            r'value=["\'](\d+)["\'][^>]*name=["\']datasetid["\']',
+            r'datasetid(?:=|%3D)(\d+)',
+        ):
+            found.update(re.findall(pattern, html, flags=re.IGNORECASE))
+
+    # Final fallback: scan the full page source for explicit datasetid
+    # references. Avoid generic digit matching so unrelated numbers are not
+    # interpreted as dataset IDs.
+    source = driver.page_source or ""
+    for pattern in (
+        r'name=["\']datasetid["\'][^>]*value=["\'](\d+)["\']',
+        r'value=["\'](\d+)["\'][^>]*name=["\']datasetid["\']',
+        r'datasetid(?:=|%3D)(\d+)',
+        r'datasetid\s*["\']?\s*[:=]\s*["\']?(\d+)',
+    ):
+        found.update(re.findall(pattern, source, flags=re.IGNORECASE))
+
+    return sorted(found, key=lambda value: int(value))
+
+
+def get_datasetids_for_subid(subid: str) -> list[str]:
+    """
+    Return all dataset IDs currently listed for one subject ID.
+
+    This is used by the SPLLT suite because one Selenium suite run creates
+    multiple independent battery administrations for the same subid.
+    """
+    driver = build_chrome_driver()
+
+    try:
+        do_login(driver, LOGIN_URL, RESULTS_URL)
+        time.sleep(1)
+        driver.get(RESULTS_URL)
+
+        field = WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.NAME, "multi_subid"))
+        )
+        field.clear()
+        field.send_keys(subid)
+
+        try:
+            Select(
+                driver.find_element(By.NAME, "multi_siteid")
+            ).select_by_value("TEST")
+        except Exception:
+            pass
+
+        list_sessions_btn = WebDriverWait(driver, 20).until(
+            EC.element_to_be_clickable(
+                (By.XPATH, "//input[@value='   List Session(s)   ']")
+            )
+        )
+        _safe_click(driver, list_sessions_btn)
+
+        WebDriverWait(driver, 20).until(
+            lambda d: len(
+                d.find_elements(
+                    By.XPATH,
+                    "//input[@name='ViewSession' and @value='View']",
+                )
+            ) > 0
+        )
+
+        time.sleep(0.5)
+        return _extract_datasetids_from_session_list(driver)
+
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------
+# Open one exact dataset score page
+# ---------------------------------------------------------------------
+
+
+def _post_results_form(driver, op: str, datasetid: str) -> None:
+    """POST op + datasetid to results.pl using the authenticated browser."""
+    driver.execute_script(
+        """
+        const action = arguments[0];
+        const op = arguments[1];
+        const datasetid = arguments[2];
+
+        const form = document.createElement('form');
+        form.method = 'POST';
+        form.action = action;
+
+        const opInput = document.createElement('input');
+        opInput.type = 'hidden';
+        opInput.name = 'op';
+        opInput.value = op;
+        form.appendChild(opInput);
+
+        const datasetInput = document.createElement('input');
+        datasetInput.type = 'hidden';
+        datasetInput.name = 'datasetid';
+        datasetInput.value = datasetid;
+        form.appendChild(datasetInput);
+
+        document.body.appendChild(form);
+        form.submit();
+        """,
+        BASE_RESULTS_URL,
+        op,
+        str(datasetid),
     )
+
+    # Allow navigation to begin before checking documentReady.
+    time.sleep(0.4)
+    WebDriverWait(driver, 20).until(_document_ready)
 
 
 def _validate_datasetid(driver, datasetid: str) -> None:
     expected = str(datasetid).strip()
 
-    element = WebDriverWait(driver, 20).until(
-        lambda d: d.find_element(By.CSS_SELECTOR, "input[name='datasetid']")
-    )
-
-    observed = (element.get_attribute("value") or "").strip()
-
-    if observed != expected:
-        raise RuntimeError(
-            "SPLLT results page dataset mismatch: "
-            f"requested {expected}, page shows {observed!r}"
+    def matching_dataset(d):
+        elements = d.find_elements(
+            By.CSS_SELECTOR,
+            "input[name='datasetid']",
         )
+
+        for element in elements:
+            observed = (element.get_attribute("value") or "").strip()
+            if observed == expected:
+                return True
+
+        return False
+
+    WebDriverWait(driver, 20).until(matching_dataset)
 
 
 def open_scores_for_datasetid(driver, datasetid: str) -> None:
     """
-    Open the exact CNB score page for one dataset ID.
+    Open scores for one exact dataset ID.
 
-    SPLLT creates one dataset ID per scenario, so selecting a session only by
-    subid is not sufficient. This function navigates directly to the requested
-    dataset and validates that the returned page belongs to that dataset.
+    The scraper browser is authenticated once before the record loop. We use
+    a POST form here because CNB's results.pl flow is form-driven; a direct
+    GET to ?op=display_scores&datasetid=... is not reliable.
     """
     datasetid = str(datasetid).strip()
 
     if not datasetid:
         raise ValueError("datasetid is required")
 
-    url = _dataset_scores_url(datasetid)
-    driver.get(url)
-
-    WebDriverWait(driver, 20).until(_document_ready)
-
-    # If authentication redirected us away from the results page, log in and
-    # then return to the exact dataset URL.
-    if not driver.find_elements(By.CSS_SELECTOR, "input[name='datasetid']"):
-        do_login(driver, LOGIN_URL)
-        time.sleep(1)
-        driver.get(url)
-        WebDriverWait(driver, 20).until(_document_ready)
-
+    _post_results_form(
+        driver,
+        op="display_scores",
+        datasetid=datasetid,
+    )
     _validate_datasetid(driver, datasetid)
 
-    # display_scores normally exposes a ListScores submit button. If the page
-    # is already showing score rows, no extra click is needed.
     list_scores_buttons = [
         element
         for element in driver.find_elements(By.NAME, "ListScores")
@@ -166,6 +314,11 @@ def collect_spllt_scores(driver) -> dict[str, str]:
         scores[canonical] = cells[1].text.strip()
 
     return scores
+
+
+# ---------------------------------------------------------------------
+# CSV output
+# ---------------------------------------------------------------------
 
 
 def _empty_csv_row() -> dict:
@@ -231,19 +384,8 @@ def scrape_spllt_records(ctx, completed_tests: list[dict]) -> list[dict]:
     """
     Scrape every SPLLT scenario by its exact dataset ID.
 
-    Expected input records look like:
-        {
-            "test_name": "spllt-a-1.00-ff",
-            "strategy": "coverage",
-            "datasetid": "3841929",
-            "status": "PASS",
-            ...
-        }
-
     Output:
         <ctx.output_dir>/spllt_results.csv
-
-    There is one CSV row per SPLLT scenario/dataset ID.
     """
     records = [
         record
@@ -260,9 +402,9 @@ def scrape_spllt_records(ctx, completed_tests: list[dict]) -> list[dict]:
     driver = build_chrome_driver()
 
     try:
-        # Establish an authenticated results session once, then reuse the same
-        # browser for all SPLLT dataset IDs.
-        do_login(driver, LOGIN_URL)
+        # Authenticate exactly once. Do not call do_login again merely because
+        # a direct results-page shape is unexpected.
+        do_login(driver, LOGIN_URL, RESULTS_URL)
         time.sleep(1)
 
         (
