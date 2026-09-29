@@ -8,6 +8,7 @@ import re
 import time
 from datetime import datetime
 from pathlib import Path
+from scraping.spllt_scraper import scrape_spllt_records
 
 try:
     from core.driver_factory import build_driver
@@ -616,7 +617,7 @@ def main():
             headless=headless,
             run_scope=run_scope,
             selected_test_tokens=selected_test_tokens,
-        )
+            )
 
         logger.info("Battery completed. Waiting 5 seconds before closing test browser...")
         time.sleep(5)
@@ -678,22 +679,58 @@ def main():
     logger.info("Run metadata written to %s", outputs["metadata_path"])
     logger.info("Summary CSV written to %s", outputs["summary_path"])
 
-    if score_scraping_enabled():
-        logger.info("Starting score scraping for completed tests because SCRAPE_RESULTS=1...")
-        scrape_results = scrape_completed_tests(ctx, completed_tests)
+    spllt_records = [
+        record
+        for record in completed_tests
+        if record.get("test_name") == "spllt-a-1.00-ff"
+    ]
+
+    if spllt_records:
+        logger.info(
+            "Starting SPLLT dataset-specific score scraping for %d scenarios...",
+            len(spllt_records),
+        )
+
+        scrape_results = scrape_spllt_records(
+            ctx,
+            spllt_records,
+        )
+
+    elif score_scraping_enabled():
+        logger.info(
+            "Starting score scraping for completed tests "
+            "because SCRAPE_RESULTS=1..."
+        )
+
+        scrape_results = scrape_completed_tests(
+            ctx,
+            completed_tests,
+        )
+
     else:
-        logger.info("Score scraping skipped because SCRAPE_RESULTS is not enabled.")
+        logger.info(
+            "Score scraping skipped because SCRAPE_RESULTS "
+            "is not enabled."
+        )
+
         scrape_results = [{
             "test_name": "__score_scraping__",
             "status": "SKIPPED",
             "scrape_status": "SKIPPED_BY_CONFIG",
-            "reason": "Score scraping is currently disabled. Set SCRAPE_RESULTS=1 to enable it later.",
+            "reason": (
+                "Score scraping is currently disabled. "
+                "Set SCRAPE_RESULTS=1 to enable it later."
+            ),
             "datasetid": datasetid,
         }]
 
     scrape_path = output_dir / "scrape_results.json"
     scrape_path.write_text(
-        json.dumps(scrape_results, indent=2, ensure_ascii=False),
+        json.dumps(
+            scrape_results,
+            indent=2,
+            ensure_ascii=False,
+        ),
         encoding="utf-8",
     )
 
