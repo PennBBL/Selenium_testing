@@ -5,6 +5,7 @@ import json
 import re
 import time
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -21,19 +22,25 @@ from tests_catalog.spllt_scenarios import (
 )
 from workflows.launch_battery import launch_battery
 
+try:
+    from scraping.base_scraper import get_datasetid_for_subid
+except Exception:
+    get_datasetid_for_subid = None
+
 
 class SPLLTPlugin:
     """
     Short Penn List Learning Test functional test suite.
 
-    Important behavior:
-    - One SPLLT administration runs one scenario.
-    - The exact same response sequence is used in all 3 recall blocks.
-    - Every time SPLLT is tested, this plugin runs every configured scenario.
-    - Between scenarios, the SPLLT-only battery is relaunched to create a fresh
-      administration/session.
-    - Scenario-level expected interactions are written to JSON for later
-      comparison with CNB results/scoring output.
+    Design:
+    - SPLLT is expected to be the only task in its battery.
+    - One complete SPLLT administration runs one scenario.
+    - The same scenario sequence is repeated in all 3 recall blocks.
+    - Every SPLLT test run executes every configured scenario.
+    - A fresh SPLLT battery is launched between scenarios.
+    - Each scenario is exposed as its own completed-test record so the final
+      completed_tests_summary.csv can show one row per scenario.
+    - Each scenario record carries its own datasetid.
     """
 
     exact_code = "spllt-a-1.00-ff"
@@ -43,6 +50,13 @@ class SPLLTPlugin:
     RECALL_WAIT_SECONDS = 30
     BETWEEN_CLICKS_SECONDS = 0.15
     END_OF_ADMINISTRATION_WAIT_SECONDS = 3.0
+
+    DATASET_LOOKUP_TIMEOUT_SECONDS = 40
+    DATASET_LOOKUP_INTERVAL_SECONDS = 2
+
+    # ------------------------------------------------------------------
+    # Basic response-button helpers
+    # ------------------------------------------------------------------
 
     def _normalize_label(self, value: str) -> str:
         value = str(value or "")
@@ -61,7 +75,10 @@ class SPLLTPlugin:
     def _visible_response_buttons(self, ctx):
         buttons = []
 
-        for element in ctx.driver.find_elements(By.CSS_SELECTOR, self.RESPONSE_SELECTOR):
+        for element in ctx.driver.find_elements(
+            By.CSS_SELECTOR,
+            self.RESPONSE_SELECTOR,
+        ):
             try:
                 if element.is_displayed() and element.is_enabled():
                     buttons.append(element)
@@ -119,11 +136,16 @@ class SPLLTPlugin:
         except Exception:
             return False
 
+    # ------------------------------------------------------------------
+    # Counter/layout observation
+    # ------------------------------------------------------------------
+
     def _read_visible_counter(self, ctx) -> int | None:
         """
-        Best-effort counter read. The App.js defines a max-25 counter, but the
-        exact cnbjs DOM is not known yet. If a numeric value is exposed next to
-        'Total Responses Made', capture it; otherwise return None without failing.
+        Best-effort read of the visible response counter.
+
+        The App.js defines a counter with max=25. The exact cnbjs DOM is not
+        guaranteed, so failure to read the counter must not fail the scenario.
         """
         try:
             body_text = ctx.driver.find_element(By.TAG_NAME, "body").text
@@ -146,24 +168,35 @@ class SPLLTPlugin:
         return None
 
     def _capture_layout(self, ctx) -> dict[str, dict[str, float]]:
-        """Capture button centers for later quadrant/layout inspection."""
+        """Capture response-button positions for quadrant/layout inspection."""
         layout = {}
 
         for label, button in self._button_map(ctx).items():
             try:
                 rect = button.rect
+
+                x = float(rect.get("x", 0))
+                y = float(rect.get("y", 0))
+                width = float(rect.get("width", 0))
+                height = float(rect.get("height", 0))
+
                 layout[label] = {
-                    "x": float(rect.get("x", 0)),
-                    "y": float(rect.get("y", 0)),
-                    "width": float(rect.get("width", 0)),
-                    "height": float(rect.get("height", 0)),
-                    "center_x": float(rect.get("x", 0)) + float(rect.get("width", 0)) / 2,
-                    "center_y": float(rect.get("y", 0)) + float(rect.get("height", 0)) / 2,
+                    "x": x,
+                    "y": y,
+                    "width": width,
+                    "height": height,
+                    "center_x": x + width / 2,
+                    "center_y": y + height / 2,
                 }
+
             except Exception:
                 continue
 
         return layout
+
+    # ------------------------------------------------------------------
+    # Recall-block execution
+    # ------------------------------------------------------------------
 
     def _click_continue_to_recall(self, ctx, block_index: int) -> None:
         click_continue(
@@ -177,9 +210,18 @@ class SPLLTPlugin:
             "SPLLT waiting for 16-word presentation before recall block %d",
             block_index + 1,
         )
-        self._wait_for_recall_block(ctx, timeout=self.RECALL_WAIT_SECONDS)
 
-    def _run_recall_block(self, ctx, scenario_name: str, block_index: int) -> dict:
+        self._wait_for_recall_block(
+            ctx,
+            timeout=self.RECALL_WAIT_SECONDS,
+        )
+
+    def _run_recall_block(
+        self,
+        ctx,
+        scenario_name: str,
+        block_index: int,
+    ) -> dict:
         sequence = scenario_sequence(scenario_name)
 
         self._click_continue_to_recall(ctx, block_index)
@@ -190,7 +232,9 @@ class SPLLTPlugin:
 
         for click_index, response in enumerate(sequence, start=1):
             before_counter = self._read_visible_counter(ctx)
+
             self._click_button(ctx, response)
+
             after_counter = self._read_visible_counter(ctx)
 
             click_log.append({
@@ -200,10 +244,9 @@ class SPLLTPlugin:
                 "counter_after": after_counter,
             })
 
-        # max_25 may auto-advance depending on cnbjs implementation. For every
-        # other scenario, MOVE TO NEXT TRIAL should still be present.
         moved_with_button = False
 
+        # max_25 may auto-advance depending on cnbjs behavior.
         if self._next_trial_visible(ctx):
             self._click_button(ctx, SPLLT_CONTROL_NEXT)
             moved_with_button = True
@@ -225,23 +268,10 @@ class SPLLTPlugin:
             "advanced_with_next_trial_button": moved_with_button,
         }
 
-    def _scenario_output_dir(self, ctx) -> Path:
-        path = Path(ctx.output_dir) / "spllt_scenarios"
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-
-    def _write_scenario_result(self, ctx, scenario_name: str, payload: dict) -> Path:
-        path = self._scenario_output_dir(ctx) / f"{scenario_name}.json"
-        path.write_text(
-            json.dumps(payload, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        return path
-
     def _wait_for_administration_end(self, ctx) -> None:
         """
-        Give the final recall block time to submit before starting a new battery
-        session. We also wait for the response grid to disappear when possible.
+        Give the final recall block time to submit before looking up its
+        dataset ID or launching the next SPLLT administration.
         """
         deadline = time.time() + self.END_OF_ADMINISTRATION_WAIT_SECONDS
 
@@ -250,10 +280,179 @@ class SPLLTPlugin:
                 break
             time.sleep(0.2)
 
-        # Small additional grace period for destructor/submission/navigation.
         time.sleep(1.0)
 
-    def _restart_for_next_scenario(self, ctx, next_scenario: str) -> None:
+    # ------------------------------------------------------------------
+    # Scenario JSON output
+    # ------------------------------------------------------------------
+
+    def _scenario_output_dir(self, ctx) -> Path:
+        path = Path(ctx.output_dir) / "spllt_scenarios"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _write_scenario_result(
+        self,
+        ctx,
+        scenario_name: str,
+        payload: dict,
+    ) -> Path:
+        path = self._scenario_output_dir(ctx) / f"{scenario_name}.json"
+
+        path.write_text(
+            json.dumps(
+                payload,
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        return path
+
+    # ------------------------------------------------------------------
+    # Dataset-ID helpers
+    # ------------------------------------------------------------------
+
+    def _datasetid_from_active_test_browser(self, ctx) -> str | None:
+        """
+        Best-effort attempt to get the dataset ID directly from the active
+        assessment session before opening the separate results browser.
+
+        This checks common URL parameters and hidden/form inputs. If the live
+        assessment does not expose datasetid, the results-page lookup is used.
+        """
+        try:
+            current_url = ctx.driver.current_url or ""
+            query = parse_qs(urlparse(current_url).query)
+
+            for key in (
+                "datasetid",
+                "dataset_id",
+                "dataset",
+            ):
+                values = query.get(key) or []
+                if values and str(values[0]).strip():
+                    return str(values[0]).strip()
+
+        except Exception:
+            pass
+
+        selectors = [
+            "input[name='datasetid']",
+            "input[name='dataset_id']",
+            "input[id='datasetid']",
+            "input[id='dataset_id']",
+            "input[name*='dataset' i]",
+            "input[id*='dataset' i]",
+        ]
+
+        for selector in selectors:
+            try:
+                elements = ctx.driver.find_elements(
+                    By.CSS_SELECTOR,
+                    selector,
+                )
+            except Exception:
+                continue
+
+            for element in elements:
+                try:
+                    value = (
+                        element.get_attribute("value")
+                        or element.get_attribute("data-value")
+                        or ""
+                    ).strip()
+
+                    if value and re.fullmatch(r"\d+", value):
+                        return value
+
+                except Exception:
+                    continue
+
+        return None
+
+    def _lookup_scenario_datasetid(
+        self,
+        ctx,
+        seen_datasetids: set[str],
+        active_datasetid: str | None = None,
+    ) -> str | None:
+        """
+        Resolve the dataset ID for the administration that just completed.
+
+        Priority:
+        1. Dataset ID captured from the active test browser.
+        2. Poll the results site until the latest dataset ID is not one that
+           has already been assigned to an earlier scenario.
+        """
+        if active_datasetid:
+            active_datasetid = str(active_datasetid).strip()
+
+            if active_datasetid and active_datasetid not in seen_datasetids:
+                ctx.logger.info(
+                    "SPLLT dataset ID captured from active session: %s",
+                    active_datasetid,
+                )
+                return active_datasetid
+
+        if get_datasetid_for_subid is None:
+            ctx.logger.warning(
+                "SPLLT dataset lookup unavailable: "
+                "get_datasetid_for_subid could not be imported."
+            )
+            return None
+
+        deadline = time.time() + self.DATASET_LOOKUP_TIMEOUT_SECONDS
+        last_datasetid = None
+
+        while time.time() < deadline:
+            try:
+                datasetid = get_datasetid_for_subid(
+                    subid=ctx.subid,
+                )
+
+                if datasetid:
+                    datasetid = str(datasetid).strip()
+                    last_datasetid = datasetid
+
+                    if datasetid not in seen_datasetids:
+                        ctx.logger.info(
+                            "SPLLT scenario dataset ID found from results: %s",
+                            datasetid,
+                        )
+                        return datasetid
+
+                    ctx.logger.info(
+                        "SPLLT results lookup still shows already-used "
+                        "dataset ID %s; waiting for the new session.",
+                        datasetid,
+                    )
+
+            except Exception as exc:
+                ctx.logger.warning(
+                    "SPLLT scenario dataset lookup attempt failed: %s",
+                    exc,
+                )
+
+            time.sleep(self.DATASET_LOOKUP_INTERVAL_SECONDS)
+
+        ctx.logger.warning(
+            "SPLLT could not find a new dataset ID. Last dataset ID seen: %s",
+            last_datasetid,
+        )
+
+        return None
+
+    # ------------------------------------------------------------------
+    # Battery restart / artifacts
+    # ------------------------------------------------------------------
+
+    def _restart_for_next_scenario(
+        self,
+        ctx,
+        next_scenario: str,
+    ) -> None:
         ctx.logger.info(
             "SPLLT relaunching battery for next scenario: %s",
             next_scenario,
@@ -267,32 +466,66 @@ class SPLLTPlugin:
 
         if exact_code not in self.exact_codes:
             raise RuntimeError(
-                f"SPLLT suite relaunched battery but found {exact_code!r}, "
-                f"expected one of {sorted(self.exact_codes)}"
+                "SPLLT suite relaunched battery but found "
+                f"{exact_code!r}, expected one of "
+                f"{sorted(self.exact_codes)}"
             )
 
         landing.click_continue()
 
-    def _capture_failure(self, ctx, name: str, metadata: dict) -> None:
+    def _capture_failure(
+        self,
+        ctx,
+        name: str,
+        metadata: dict,
+    ) -> None:
         """Support both artifact-manager signatures used by this project."""
         try:
             method = ctx.artifacts.capture_failure
-            parameter_names = list(inspect.signature(method).parameters)
+            parameter_names = list(
+                inspect.signature(method).parameters
+            )
 
-            # Older implementation: capture_failure(driver, name, metadata)
-            if parameter_names and parameter_names[0] in {"driver", "browser"}:
-                method(ctx.driver, name, metadata)
+            # Older implementation:
+            # capture_failure(driver, name, metadata)
+            if parameter_names and parameter_names[0] in {
+                "driver",
+                "browser",
+            }:
+                method(
+                    ctx.driver,
+                    name,
+                    metadata,
+                )
                 return
 
-            # Newer implementation stores the driver on the manager and uses
-            # capture_failure(name, reason, metadata).
-            reason = str(metadata.get("error") or "SPLLT scenario failure")
-            method(name, reason, metadata)
+            # Newer implementation:
+            # capture_failure(name, reason, metadata)
+            reason = str(
+                metadata.get("error")
+                or "SPLLT scenario failure"
+            )
+
+            method(
+                name,
+                reason,
+                metadata,
+            )
 
         except Exception:
-            ctx.logger.exception("SPLLT failure artifact capture failed")
+            ctx.logger.exception(
+                "SPLLT failure artifact capture failed"
+            )
 
-    def _run_one_scenario(self, ctx, scenario_name: str) -> dict:
+    # ------------------------------------------------------------------
+    # One complete SPLLT administration
+    # ------------------------------------------------------------------
+
+    def _run_one_scenario(
+        self,
+        ctx,
+        scenario_name: str,
+    ) -> dict:
         expected = expected_scenario_payload(scenario_name)
         blocks = []
 
@@ -309,6 +542,7 @@ class SPLLTPlugin:
                 scenario_name=scenario_name,
                 block_index=block_index,
             )
+
             blocks.append(block_result)
 
         self._wait_for_administration_end(ctx)
@@ -321,16 +555,32 @@ class SPLLTPlugin:
             "error": None,
         }
 
+    # ------------------------------------------------------------------
+    # Full SPLLT suite
+    # ------------------------------------------------------------------
+
     def run(self, ctx, strategy="suite"):
-        errors = []
+        """
+        Run every SPLLT scenario.
+
+        The registry strategy can remain "suite" internally. That value is not
+        intended for completed_tests_summary.csv. Instead, this method exposes
+        ctx.spllt_scenario_records, containing one row-worthy record per
+        scenario with strategy=<scenario name> and its own datasetid.
+        """
+        suite_errors = []
         summary = []
+        scenario_records = []
+        seen_datasetids: set[str] = set()
 
         ctx.logger.info(
             "SPLLT functional suite starting with %d scenarios",
             len(SPLLT_SCENARIO_ORDER),
         )
 
-        for scenario_index, scenario_name in enumerate(SPLLT_SCENARIO_ORDER):
+        for scenario_index, scenario_name in enumerate(
+            SPLLT_SCENARIO_ORDER
+        ):
             ctx.logger.info(
                 "SPLLT scenario %d/%d: %s",
                 scenario_index + 1,
@@ -338,22 +588,37 @@ class SPLLTPlugin:
                 scenario_name,
             )
 
+            # Try to capture datasetid from the live administration before the
+            # destructor/final navigation removes session information.
+            active_datasetid = self._datasetid_from_active_test_browser(ctx)
+
+            scenario_error = None
+
             try:
-                payload = self._run_one_scenario(ctx, scenario_name)
+                payload = self._run_one_scenario(
+                    ctx,
+                    scenario_name,
+                )
                 scenario_status = "PASS"
 
             except Exception as exc:
-                error = f"SPLLT scenario {scenario_name} failed: {exc}"
-                errors.append(error)
+                scenario_error = str(exc)
                 scenario_status = "FAIL"
 
+                error = (
+                    f"SPLLT scenario {scenario_name} failed: "
+                    f"{scenario_error}"
+                )
+
+                suite_errors.append(error)
                 ctx.logger.exception(error)
+
                 self._capture_failure(
                     ctx,
                     f"spllt_{scenario_name}_failure",
                     {
                         "scenario": scenario_name,
-                        "error": str(exc),
+                        "error": scenario_error,
                     },
                 )
 
@@ -362,12 +627,23 @@ class SPLLTPlugin:
                     "selenium_status": "FAIL",
                     "data_validation": "PENDING",
                     "observed_interactions": [],
-                    "error": str(exc),
+                    "error": scenario_error,
                 }
 
-                # Do not trust the current task state after a scenario failure.
-                # The next scenario starts from a fresh battery launch below.
                 time.sleep(1.0)
+
+            # Each scenario is one complete battery administration, so resolve
+            # and store its dataset ID before launching the next battery.
+            datasetid = self._lookup_scenario_datasetid(
+                ctx,
+                seen_datasetids=seen_datasetids,
+                active_datasetid=active_datasetid,
+            )
+
+            if datasetid:
+                seen_datasetids.add(str(datasetid))
+
+            payload["datasetid"] = datasetid
 
             output_path = self._write_scenario_result(
                 ctx,
@@ -375,38 +651,107 @@ class SPLLTPlugin:
                 payload,
             )
 
+            reason = (
+                "Completed successfully."
+                if scenario_status == "PASS"
+                else f"Scenario failed: {scenario_error}"
+            )
+
+            record = {
+                "test_name": self.exact_code,
+                "status": scenario_status,
+                "reason": reason,
+                "errors": (
+                    []
+                    if scenario_status == "PASS"
+                    else [scenario_error]
+                ),
+                "scrape": True,
+                "strategy": scenario_name,
+                "datasetid": datasetid,
+            }
+
+            scenario_records.append(record)
+
             summary.append({
                 "scenario": scenario_name,
                 "status": scenario_status,
+                "datasetid": datasetid,
                 "output": str(output_path),
             })
 
-            # Every scenario is a separate SPLLT administration. Since the
-            # SPLLT battery contains no subsequent tasks, relaunch immediately
-            # for the next scenario.
+            # Every scenario is a separate SPLLT administration. The SPLLT
+            # battery contains no subsequent tasks, so relaunch immediately.
             if scenario_index < len(SPLLT_SCENARIO_ORDER) - 1:
-                next_scenario = SPLLT_SCENARIO_ORDER[scenario_index + 1]
+                next_scenario = SPLLT_SCENARIO_ORDER[
+                    scenario_index + 1
+                ]
 
                 try:
-                    self._restart_for_next_scenario(ctx, next_scenario)
-                except Exception as exc:
-                    error = (
-                        f"SPLLT could not relaunch battery before scenario "
-                        f"{next_scenario}: {exc}"
+                    self._restart_for_next_scenario(
+                        ctx,
+                        next_scenario,
                     )
-                    errors.append(error)
-                    ctx.logger.exception(error)
+
+                except Exception as exc:
+                    fatal_error = (
+                        "SPLLT could not relaunch battery before "
+                        f"scenario {next_scenario}: {exc}"
+                    )
+
+                    suite_errors.append(fatal_error)
+                    ctx.logger.exception(fatal_error)
+
+                    # Add explicit failed rows for every scenario that could
+                    # not be run, so the summary never silently omits them.
+                    remaining = SPLLT_SCENARIO_ORDER[
+                        scenario_index + 1:
+                    ]
+
+                    for missing_scenario in remaining:
+                        missing_reason = (
+                            "Not run because SPLLT battery relaunch failed "
+                            f"before {next_scenario}."
+                        )
+
+                        scenario_records.append({
+                            "test_name": self.exact_code,
+                            "status": "FAIL",
+                            "reason": missing_reason,
+                            "errors": [fatal_error],
+                            "scrape": False,
+                            "strategy": missing_scenario,
+                            "datasetid": None,
+                        })
+
+                        summary.append({
+                            "scenario": missing_scenario,
+                            "status": "FAIL",
+                            "datasetid": None,
+                            "output": None,
+                            "reason": missing_reason,
+                        })
+
                     break
 
-        summary_path = self._scenario_output_dir(ctx) / "suite_summary.json"
+        # runner.py will replace the generic one-row SPLLT result with these
+        # scenario-level rows.
+        ctx.spllt_scenario_records = scenario_records
+        ctx.spllt_suite_errors = suite_errors
+
+        summary_path = (
+            self._scenario_output_dir(ctx)
+            / "suite_summary.json"
+        )
+
         summary_path.write_text(
             json.dumps(
                 {
                     "test": self.exact_code,
-                    "strategy": strategy,
+                    "internal_strategy": strategy,
                     "scenario_order": SPLLT_SCENARIO_ORDER,
                     "results": summary,
-                    "errors": errors,
+                    "errors": suite_errors,
                 },
                 indent=2,
                 ensure_ascii=False,
@@ -414,7 +759,11 @@ class SPLLTPlugin:
             encoding="utf-8",
         )
 
-        if errors:
-            return TestRunResult(status="FAIL", errors=errors)
-
-        return TestRunResult(status="PASS", errors=[])
+        # Important: scenario PASS/FAIL is carried in
+        # ctx.spllt_scenario_records. Return PASS here so run_battery does not
+        # convert the entire suite into one generic FAIL row or Ctrl+. the
+        # final page merely because one scenario failed.
+        return TestRunResult(
+            status="PASS",
+            errors=[],
+        )
