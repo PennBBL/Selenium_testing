@@ -198,6 +198,16 @@ RESULTS_CONFIGS = {
             # Add confirmed PCET score names after raw scrape.
         ],
     ),
+    # ------------------------------------------------------------------
+    # PVT
+    # ------------------------------------------------------------------
+    "pvt-b-5.00-ff": ResultsConfig(
+        test_name="pvt-b-5.00-ff",
+        csv_file="pvt_results.csv",
+        target_scores=[
+            "ScorVers",
+        ],
+    ),
 
     # ------------------------------------------------------------------
     # SPCPTNL
