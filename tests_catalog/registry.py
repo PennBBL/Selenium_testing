@@ -101,5 +101,5 @@ DEFAULT_STRATEGIES = {
     "zh_CN-k-svolt-3.01-ff": "random",
     "k-svolt-3.01-ff": "random",
     "spllt-a-1.00-ff": "suite",
-    "pvt-b-5.00-ff": "perfect_300",
+    "pvt-b-5.00-ff": "first5_false_starts",
 }
