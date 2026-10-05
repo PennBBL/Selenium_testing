@@ -196,69 +196,99 @@ def get_datasetids_for_subid(subid: str) -> list[str]:
 # ---------------------------------------------------------------------
 
 
-def _post_results_form(driver, op: str, datasetid: str) -> None:
-    """POST op + datasetid to results.pl using the authenticated browser."""
+def _post_results_form(driver, datasetid: str) -> None:
+    """
+    Submit the same fields as the CNB "List Scores" form.
+
+    The live score-page HTML shows that the form submits:
+        op=display_scores
+        datasetid=<exact dataset>
+        test=spllt-a-1.00-ff
+        ListScores=List Scores
+
+    Posting only op + datasetid is not equivalent to clicking the real
+    List Scores button, because the clicked submit button contributes its
+    own name/value to the POST body.
+    """
     driver.execute_script(
         """
         const action = arguments[0];
-        const op = arguments[1];
-        const datasetid = arguments[2];
+        const datasetid = arguments[1];
+        const testCode = arguments[2];
 
         const form = document.createElement('form');
         form.method = 'POST';
         form.action = action;
 
-        const opInput = document.createElement('input');
-        opInput.type = 'hidden';
-        opInput.name = 'op';
-        opInput.value = op;
-        form.appendChild(opInput);
+        function addField(name, value) {
+            const input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = name;
+            input.value = value;
+            form.appendChild(input);
+        }
 
-        const datasetInput = document.createElement('input');
-        datasetInput.type = 'hidden';
-        datasetInput.name = 'datasetid';
-        datasetInput.value = datasetid;
-        form.appendChild(datasetInput);
+        addField('op', 'display_scores');
+        addField('datasetid', datasetid);
+        addField('test', testCode);
+        addField('ListScores', 'List Scores');
 
         document.body.appendChild(form);
         form.submit();
         """,
         BASE_RESULTS_URL,
-        op,
         str(datasetid),
+        SPLLT_TEST_CODE,
     )
 
-    # Allow navigation to begin before checking documentReady.
+    # Allow the POST navigation to begin, then wait for the destination
+    # document to finish loading.
     time.sleep(0.4)
-    WebDriverWait(driver, 20).until(_document_ready)
+    WebDriverWait(driver, 30).until(_document_ready)
 
 
 def _validate_datasetid(driver, datasetid: str) -> None:
     expected = str(datasetid).strip()
 
     def matching_dataset(d):
-        elements = d.find_elements(
+        # Primary check: hidden datasetid field on the score page.
+        for element in d.find_elements(
             By.CSS_SELECTOR,
             "input[name='datasetid']",
-        )
-
-        for element in elements:
+        ):
             observed = (element.get_attribute("value") or "").strip()
             if observed == expected:
                 return True
 
-        return False
+        # Fallback: the Test Information table visibly prints Dataset ID.
+        body_text = d.find_element(By.TAG_NAME, "body").text or ""
+        return expected in body_text and "Dataset ID:" in body_text
 
-    WebDriverWait(driver, 20).until(matching_dataset)
+    WebDriverWait(driver, 30).until(matching_dataset)
+
+
+def _score_page_loaded(driver) -> bool:
+    """
+    Confirm that the SPLLT score section, not merely generic row markup,
+    has loaded.
+
+    The page has many tr.row1/tr.row2 elements before the score table, so
+    generic row-count checks are not sufficient.
+    """
+    body_text = driver.find_element(By.TAG_NAME, "body").text or ""
+
+    return (
+        "Test Scores:" in body_text
+        and SPLLT_TEST_CODE in body_text
+    )
 
 
 def open_scores_for_datasetid(driver, datasetid: str) -> None:
     """
-    Open scores for one exact dataset ID.
+    Open the score page for one exact SPLLT dataset.
 
-    The scraper browser is authenticated once before the record loop. We use
-    a POST form here because CNB's results.pl flow is form-driven; a direct
-    GET to ?op=display_scores&datasetid=... is not reliable.
+    This submits the canonical List Scores POST in one step and avoids the
+    previous two-stage POST-then-click sequence that was timing out.
     """
     datasetid = str(datasetid).strip()
 
@@ -267,27 +297,12 @@ def open_scores_for_datasetid(driver, datasetid: str) -> None:
 
     _post_results_form(
         driver,
-        op="display_scores",
         datasetid=datasetid,
     )
+
     _validate_datasetid(driver, datasetid)
 
-    list_scores_buttons = [
-        element
-        for element in driver.find_elements(By.NAME, "ListScores")
-        if element.is_displayed() and element.is_enabled()
-    ]
-
-    if list_scores_buttons:
-        _safe_click(driver, list_scores_buttons[0])
-        WebDriverWait(driver, 20).until(_document_ready)
-        _validate_datasetid(driver, datasetid)
-
-    WebDriverWait(driver, 20).until(
-        lambda d: len(
-            d.find_elements(By.CSS_SELECTOR, "tr.row1, tr.row2")
-        ) > 0
-    )
+    WebDriverWait(driver, 30).until(_score_page_loaded)
 
 
 def collect_spllt_scores(driver) -> dict[str, str]:
