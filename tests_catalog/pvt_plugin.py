@@ -15,7 +15,7 @@ from tests_catalog.common import TestRunResult
 class PVTPlugin:
     exact_code = "pvt-b-5.00-ff"
 
-    PRACTICE_TRIALS = 2
+    PRACTICE_TRIALS = 7
     TEST_TRIALS = 15
     PRACTICE_RT_MS = 300
     MAIN_TEST_TRANSITION_TIMEOUT_SECONDS = 45
