@@ -56,6 +56,9 @@ TEST_REGISTRY = {
     "zn_CN-k-svolt-3.01-ff": SVOLTPlugin,
     "zn_CN-k-svolt-3.01_voice-ff": SVOLTPlugin,
     "spllt-a-1.00-ff": SPLLTPlugin,
+    "spllt-b-1.00-ff": SPLLTPlugin,
+    "spllt-c-1.00-ff": SPLLTPlugin,
+    "spllt-d-1.00-ff": SPLLTPlugin,
     "pvt-b-5.00-ff": PVTPlugin,
     "pvt-b-6.00-ff": PVT6Plugin,
 
@@ -103,6 +106,9 @@ DEFAULT_STRATEGIES = {
     "zh_CN-k-svolt-3.01-ff": "random",
     "k-svolt-3.01-ff": "random",
     "spllt-a-1.00-ff": "suite",
+    "spllt-b-1.00-ff": "suite",
+    "spllt-c-1.00-ff": "suite",
+    "spllt-d-1.00-ff": "suite",
     "pvt-b-5.00-ff": "first5_false_starts",
     "pvt-b-6.00-ff": "first5_false_starts",
 }
