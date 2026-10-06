@@ -14,6 +14,7 @@ from tests_catalog.zn_spcptnl_plugin import ZN_SPCPTNLPlugin
 from tests_catalog.svolt_plugin import SVOLTPlugin
 from tests_catalog.spllt_plugin import SPLLTPlugin
 from tests_catalog.pvt_plugin import PVTPlugin
+from tests_catalog.pvt6_plugin import PVT6Plugin
 
 TEST_REGISTRY = {
     "k-er40-d-4.60-ff": ER40Plugin,
@@ -56,7 +57,7 @@ TEST_REGISTRY = {
     "zn_CN-k-svolt-3.01_voice-ff": SVOLTPlugin,
     "spllt-a-1.00-ff": SPLLTPlugin,
     "pvt-b-5.00-ff": PVTPlugin,
-    "pvt-b-6.00-ff": PVTPlugin,
+    "pvt-b-6.00-ff": PVT6Plugin,
 
 }
 
@@ -103,5 +104,5 @@ DEFAULT_STRATEGIES = {
     "k-svolt-3.01-ff": "random",
     "spllt-a-1.00-ff": "suite",
     "pvt-b-5.00-ff": "first5_false_starts",
-    "pvt-b-6.00-ff": "first5_false_starts",
+    "pvt-b-6.00-ff": "under_350",
 }
