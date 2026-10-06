@@ -32,6 +32,12 @@ from core.subid_registry import SubidRegistry
 from tests_catalog.registry import TEST_REGISTRY
 from workflows.launch_battery import launch_battery
 from workflows.run_battery import run_battery
+from core.environment import (
+    choose_environment,
+    activate_environment,
+    apply_environment_to_scrapers,
+    apply_environment_to_context,
+)
 from workflows.scrape_completed_tests import scrape_completed_tests
 
 try:
