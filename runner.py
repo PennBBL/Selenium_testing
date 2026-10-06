@@ -277,6 +277,8 @@ def completed_summary_rows(
     datasetid: str | None,
     subid: str,
     battery_code: str,
+    environment: str,
+    cnb_host: str,
     browser: str,
     headless: bool,
     run_scope: str,
@@ -299,6 +301,8 @@ def completed_summary_rows(
             "datasetid": record.get("datasetid") or datasetid or "",
             "subid": subid,
             "battery_code": battery_code,
+            "environment": environment,
+            "cnb_host": cnb_host,
             "browser": browser,
             "browser_name": browser_name,
             "browser_version": browser_version,
@@ -325,6 +329,8 @@ def write_summary_csv(path: Path, rows: list[dict]) -> None:
         "datasetid",
         "subid",
         "battery_code",
+        "environment",
+        "cnb_host",
         "browser",
         "browser_name",
         "browser_version",
@@ -367,6 +373,8 @@ def write_run_outputs(
     datasetid: str | None,
     subid: str,
     battery_code: str,
+    environment: str,
+    cnb_host: str,
     browser: str,
     headless: bool,
     run_scope: str,
@@ -384,6 +392,8 @@ def write_run_outputs(
         "datasetid": datasetid,
         "subid": subid,
         "battery_code": battery_code,
+        "environment": environment,
+        "cnb_host": cnb_host,
         "browser": browser,
         "browser_name": browser_name,
         "browser_version": browser_version,
@@ -403,6 +413,8 @@ def write_run_outputs(
         datasetid=datasetid,
         subid=subid,
         battery_code=battery_code,
+        environment=environment,
+        cnb_host=cnb_host,
         browser=browser,
         browser_name=browser_name,
         browser_version=browser_version,
@@ -521,6 +533,9 @@ def main():
     print("Browser-selectable, selected-test capable, headless-capable")
     print("Score scraping disabled by default; status summary enabled")
     print("=" * 70)
+    environment_name = choose_environment()
+    environment_config = activate_environment(environment_name)
+    apply_environment_to_scrapers(environment_config)
 
     browser = choose_browser()
     subid = prompt_required("Enter Subject ID / subid: ")
@@ -531,6 +546,9 @@ def main():
     run_date = datetime.now().strftime("%Y%m%d")
 
     print()
+    print(f"Environment: {environment_config.name.upper()}")
+    print(f"CNB host: {environment_config.base_host}")
+    print(f"Environment file: {environment_config.env_file}")
     print(f"Browser: {browser}")
     print(f"Headless: {headless}")
     print(f"Subid: {subid}")
@@ -548,6 +566,9 @@ def main():
 
     logger = setup_logging(output_dir)
     logger.info("Starting PENN CNB Battery Runner")
+    logger.info("Environment: %s", environment_config.name.upper())
+    logger.info("CNB host: %s", environment_config.base_host)
+    logger.info("Environment file: %s", environment_config.env_file)
     logger.info("Browser: %s", browser)
     logger.info("Headless: %s", headless)
     logger.info("Subid: %s", subid)
@@ -590,6 +611,11 @@ def main():
             headless=headless,
         )
 
+        apply_environment_to_context(
+            ctx,
+            environment_config,
+        )
+
         ctx.registry = registry
         ctx.run_scope = run_scope
         ctx.selected_test_tokens = selected_test_tokens
@@ -619,6 +645,8 @@ def main():
             datasetid=None,
             subid=subid,
             battery_code=battery_code,
+            environment=environment_config.name,
+            cnb_host=environment_config.base_host,
             browser=browser,
             headless=headless,
             run_scope=run_scope,
@@ -670,6 +698,8 @@ def main():
         datasetid=datasetid,
         subid=subid,
         battery_code=battery_code,
+        environment=environment_config.name,
+        cnb_host=environment_config.base_host,
         browser=browser,
         browser_name=runtime_env["browser_name"],
         browser_version=runtime_env["browser_version"],
