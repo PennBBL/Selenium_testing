@@ -19,7 +19,12 @@ from scraping.base_scraper import (
 )
 
 
-SPLLT_TEST_CODE = "spllt-a-1.00-ff"
+SPLLT_TEST_CODES = {
+    "spllt-a-1.00-ff",
+    "spllt-b-1.00-ff",
+    "spllt-c-1.00-ff",
+    "spllt-d-1.00-ff",
+}
 SPLLT_CSV_NAME = "spllt_results.csv"
 
 SPLLT_SCORE_COLUMNS = [
@@ -161,7 +166,7 @@ def get_datasetids_for_subid(subid: str) -> list[str]:
         try:
             Select(
                 driver.find_element(By.NAME, "multi_siteid")
-            ).select_by_value("TEST")
+            ).select_by_value("SELENIUM")
         except Exception:
             pass
 
@@ -347,6 +352,7 @@ def open_scores_for_datasetid(
     driver,
     subid: str,
     datasetid: str,
+    test_code: str,
     logger=None,
 ) -> None:
     """
@@ -364,6 +370,13 @@ def open_scores_for_datasetid(
     """
     datasetid = str(datasetid).strip()
     subid = str(subid or "").strip()
+    test_code = str(test_code or "").strip().lower()
+
+    if test_code not in SPLLT_TEST_CODES:
+        raise ValueError(
+            f"Unsupported SPLLT test code {test_code!r}; "
+            f"expected one of {sorted(SPLLT_TEST_CODES)}"
+        )
 
     if not datasetid:
         raise ValueError("datasetid is required")
@@ -403,7 +416,7 @@ def open_scores_for_datasetid(
     try:
         Select(
             driver.find_element(By.NAME, "multi_siteid")
-        ).select_by_value("TEST")
+        ).select_by_value("SELENIUM")
     except Exception:
         pass
 
@@ -518,10 +531,10 @@ def open_scores_for_datasetid(
     if not _target_scores_present(driver):
         try:
             test_select = Select(driver.find_element(By.NAME, "test"))
-            test_select.select_by_value(SPLLT_TEST_CODE)
+            test_select.select_by_value(test_code)
         except Exception as exc:
             raise RuntimeError(
-                f"Could not select {SPLLT_TEST_CODE} on score page for "
+                f"Could not select {test_code} on score page for "
                 f"datasetid={datasetid}: {exc}"
             ) from exc
 
@@ -603,6 +616,7 @@ def _write_result_row(
     *,
     output_dir: Path,
     datasetid: str | None,
+    test_name: str,
     subid: str,
     strategy: str,
     status: str,
@@ -617,7 +631,7 @@ def _write_result_row(
     row.update({
         "timestamp": datetime.now().isoformat(),
         "datasetid": datasetid or "",
-        "test_name": SPLLT_TEST_CODE,
+        "test_name": test_name,
         "subid": subid,
         "strategy": strategy,
         "test_result": status,
@@ -642,7 +656,8 @@ def scrape_spllt_records(ctx, completed_tests: list[dict]) -> list[dict]:
     records = [
         record
         for record in completed_tests
-        if record.get("test_name") == SPLLT_TEST_CODE
+        if str(record.get("test_name") or "").strip().lower()
+        in SPLLT_TEST_CODES
     ]
 
     if not records:
@@ -669,6 +684,7 @@ def scrape_spllt_records(ctx, completed_tests: list[dict]) -> list[dict]:
         for record in records:
             datasetid = str(record.get("datasetid") or "").strip()
             strategy = str(record.get("strategy") or "").strip()
+            test_name = str(record.get("test_name") or "").strip().lower()
             test_status = str(record.get("status") or "UNKNOWN").upper()
 
             if not datasetid:
@@ -681,6 +697,7 @@ def scrape_spllt_records(ctx, completed_tests: list[dict]) -> list[dict]:
                 csv_path = _write_result_row(
                     output_dir=output_dir,
                     datasetid=None,
+                    test_name=test_name,
                     subid=ctx.subid,
                     strategy=strategy,
                     status="FAIL - MISSING DATASETID",
@@ -692,7 +709,7 @@ def scrape_spllt_records(ctx, completed_tests: list[dict]) -> list[dict]:
                 )
 
                 scrape_results.append({
-                    "test_name": SPLLT_TEST_CODE,
+                    "test_name": test_name,
                     "strategy": strategy,
                     "datasetid": None,
                     "status": test_status,
@@ -714,6 +731,7 @@ def scrape_spllt_records(ctx, completed_tests: list[dict]) -> list[dict]:
                     driver,
                     subid=ctx.subid,
                     datasetid=datasetid,
+                    test_code=test_name,
                     logger=ctx.logger,
                 )
                 scores = collect_spllt_scores(driver)
@@ -737,6 +755,7 @@ def scrape_spllt_records(ctx, completed_tests: list[dict]) -> list[dict]:
                 csv_path = _write_result_row(
                     output_dir=output_dir,
                     datasetid=datasetid,
+                    test_name=test_name,
                     subid=ctx.subid,
                     strategy=strategy,
                     status=csv_status,
@@ -748,7 +767,7 @@ def scrape_spllt_records(ctx, completed_tests: list[dict]) -> list[dict]:
                 )
 
                 scrape_results.append({
-                    "test_name": SPLLT_TEST_CODE,
+                    "test_name": test_name,
                     "strategy": strategy,
                     "datasetid": datasetid,
                     "status": test_status,
@@ -769,6 +788,7 @@ def scrape_spllt_records(ctx, completed_tests: list[dict]) -> list[dict]:
                 csv_path = _write_result_row(
                     output_dir=output_dir,
                     datasetid=datasetid,
+                    test_name=test_name,
                     subid=ctx.subid,
                     strategy=strategy,
                     status=f"FAIL - SCRAPER {type(exc).__name__}",
@@ -780,7 +800,7 @@ def scrape_spllt_records(ctx, completed_tests: list[dict]) -> list[dict]:
                 )
 
                 scrape_results.append({
-                    "test_name": SPLLT_TEST_CODE,
+                    "test_name": test_name,
                     "strategy": strategy,
                     "datasetid": datasetid,
                     "status": test_status,
