@@ -13,7 +13,7 @@ class SessionContext:
     battery_code: str
     output_dir: Path
     base_url: str = 'https://penncnp.pmacs.upenn.edu/assessments.pl?start=1'
-    env_code: str = 'TEST'
+    env_code: str = 'SELENIUM'
     browser: str = 'chrome'
     headless: bool = False
     completed_tests: list[dict] = field(default_factory=list)
