@@ -4,7 +4,10 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 @dataclass(frozen=True)
@@ -23,7 +26,6 @@ class CNBEnvironment:
 
     @property
     def results_url(self) -> str:
-        # Preserve the results-page behavior currently used by the project.
         return (
             f"{self.base_host}/results.pl"
             "?op=view_sessions&adminid=mruganks"
@@ -33,15 +35,16 @@ class CNBEnvironment:
 ENVIRONMENTS = {
     "prod": CNBEnvironment(
         name="prod",
-        env_file=Path(".env"),
+        env_file=PROJECT_ROOT / ".env",
         base_host="https://penncnp.pmacs.upenn.edu",
     ),
     "dev": CNBEnvironment(
         name="dev",
-        env_file=Path(".env.dev"),
+        env_file=PROJECT_ROOT / ".env.dev",
         base_host="https://penncnp-dev.pmacs.upenn.edu",
     ),
 }
+
 
 ENVIRONMENT_ALIASES = {
     "1": "prod",
@@ -59,8 +62,8 @@ def choose_environment() -> str:
     """
     Prompt for the CNB target environment.
 
-    There is intentionally no default. This prevents an accidental production
-    run when the operator intended to use development.
+    There is intentionally no default so a blank Enter cannot accidentally
+    select production.
     """
     print()
     print("Choose environment:")
@@ -77,18 +80,44 @@ def choose_environment() -> str:
         if environment:
             return environment
 
-        print(
-            "Invalid environment. Choose 1/prod or 2/dev."
+        print("Invalid environment. Choose 1/prod or 2/dev.")
+
+
+def _known_dotenv_keys() -> set[str]:
+    """
+    Return every variable name defined in either project env file.
+
+    Clearing these before loading the selected file prevents a PROD-only
+    value from remaining in os.environ during a DEV run, or vice versa.
+    """
+    keys: set[str] = set()
+
+    for config in ENVIRONMENTS.values():
+        if not config.env_file.is_file():
+            continue
+
+        values = dotenv_values(config.env_file)
+        keys.update(
+            str(key)
+            for key in values.keys()
+            if key
         )
+
+    return keys
 
 
 def activate_environment(environment: str) -> CNBEnvironment:
     """
-    Load the selected .env file and return its CNB URL configuration.
+    Load only the selected environment's project variables.
 
-    override=True is important because some existing modules may have already
-    called load_dotenv() during import. The operator's explicit environment
-    choice must win over values loaded earlier in the process.
+    PROD:
+        <project root>/.env
+
+    DEV:
+        <project root>/.env.dev
+
+    Environment-sensitive application modules are imported only after this
+    function returns.
     """
     key = str(environment or "").strip().lower()
 
@@ -105,6 +134,12 @@ def activate_environment(environment: str) -> CNBEnvironment:
             f"Environment file not found: {config.env_file}"
         )
 
+    # Remove values belonging to either project env file first. This gives us
+    # true separation when switching between PROD and DEV within the same
+    # Python process or when a prior dotenv load occurred.
+    for variable_name in _known_dotenv_keys():
+        os.environ.pop(variable_name, None)
+
     loaded = load_dotenv(
         dotenv_path=config.env_file,
         override=True,
@@ -115,8 +150,9 @@ def activate_environment(environment: str) -> CNBEnvironment:
             f"Could not load environment file: {config.env_file}"
         )
 
-    # Make the selected environment visible to the rest of the process.
+    # Expose the selected environment explicitly to downstream modules.
     os.environ["CNB_ENVIRONMENT"] = config.name
+    os.environ["CNB_ENV_FILE"] = str(config.env_file)
     os.environ["CNB_BASE_HOST"] = config.base_host
     os.environ["CNB_ASSESSMENT_URL"] = config.assessment_url
     os.environ["CNB_LOGIN_URL"] = config.login_url
@@ -127,12 +163,7 @@ def activate_environment(environment: str) -> CNBEnvironment:
 
 def apply_environment_to_scrapers(config: CNBEnvironment) -> None:
     """
-    Update scraper module URL globals after environment selection.
-
-    This is needed because the existing scraper modules currently define URL
-    constants at import time. Applying the selected values here keeps both
-    generic score scraping and SPLLT dataset-specific scraping on the same
-    CNB environment as the test run.
+    Point already-imported scraper modules at the selected environment.
     """
     from scraping import base_scraper
 
@@ -147,17 +178,20 @@ def apply_environment_to_scrapers(config: CNBEnvironment) -> None:
     if spllt_scraper is not None:
         spllt_scraper.LOGIN_URL = config.login_url
         spllt_scraper.RESULTS_URL = config.results_url
-        spllt_scraper.BASE_RESULTS_URL = (
-            config.results_url.split("?", 1)[0]
-        )
+
+        if hasattr(spllt_scraper, "BASE_RESULTS_URL"):
+            spllt_scraper.BASE_RESULTS_URL = (
+                config.results_url.split("?", 1)[0]
+            )
 
 
-def apply_environment_to_context(ctx, config: CNBEnvironment) -> None:
+def apply_environment_to_context(
+    ctx,
+    config: CNBEnvironment,
+) -> None:
     """
-    Put the selected environment onto SessionContext.
-
-    launch_battery() and SPLLT relaunches can then keep using ctx.base_url
-    without needing environment-specific branching of their own.
+    Put the selected environment onto SessionContext so battery generation,
+    relaunches, dataset lookup, and scraping stay on the same CNB host.
     """
     ctx.environment = config.name
     ctx.base_url = config.assessment_url
