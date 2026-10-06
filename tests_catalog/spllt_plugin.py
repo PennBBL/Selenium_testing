@@ -17,7 +17,9 @@ from tests_catalog.spllt_scenarios import (
     SPLLT_BLOCK_COUNT,
     SPLLT_CONTROL_NEXT,
     SPLLT_SCENARIO_ORDER,
+    SPLLT_TEST_CODES,
     expected_scenario_payload,
+    normalize_test_code,
     scenario_sequence,
 )
 from workflows.launch_battery import launch_battery
@@ -44,8 +46,10 @@ class SPLLTPlugin:
     - Each scenario record carries its own datasetid.
     """
 
+    # exact_code remains the A form as a harmless class-level default for
+    # older callers, but every run resolves the real code from ctx.exact_code.
     exact_code = "spllt-a-1.00-ff"
-    exact_codes = {"spllt-a-1.00-ff"}
+    exact_codes = set(SPLLT_TEST_CODES)
 
     RESPONSE_SELECTOR = ".pllt-response-button"
     RECALL_WAIT_SECONDS = 30
@@ -54,6 +58,19 @@ class SPLLTPlugin:
 
     DATASET_LOOKUP_TIMEOUT_SECONDS = 40
     DATASET_LOOKUP_INTERVAL_SECONDS = 2
+
+    def _active_test_code(self, ctx) -> str:
+        code = normalize_test_code(
+            getattr(ctx, "exact_code", None) or self.exact_code
+        )
+
+        if code not in self.exact_codes:
+            raise RuntimeError(
+                f"Unsupported SPLLT test code {code!r}; "
+                f"expected one of {sorted(self.exact_codes)}"
+            )
+
+        return code
 
     # ------------------------------------------------------------------
     # Basic response-button helpers
@@ -222,8 +239,12 @@ class SPLLTPlugin:
         ctx,
         scenario_name: str,
         block_index: int,
+        test_code: str,
     ) -> dict:
-        sequence = scenario_sequence(scenario_name)
+        sequence = scenario_sequence(
+            scenario_name,
+            test_code=test_code,
+        )
 
         self._click_continue_to_recall(ctx, block_index)
 
@@ -546,6 +567,7 @@ class SPLLTPlugin:
         self,
         ctx,
         next_scenario: str,
+        expected_test_code: str,
     ) -> None:
         ctx.logger.info(
             "SPLLT relaunching battery for next scenario: %s",
@@ -558,11 +580,13 @@ class SPLLTPlugin:
         exact_code = landing.get_exact_test_code()
         ctx.exact_code = exact_code
 
-        if exact_code not in self.exact_codes:
+        exact_code = normalize_test_code(exact_code)
+
+        if exact_code != expected_test_code:
             raise RuntimeError(
-                "SPLLT suite relaunched battery but found "
-                f"{exact_code!r}, expected one of "
-                f"{sorted(self.exact_codes)}"
+                "SPLLT suite relaunched the wrong variant: "
+                f"found {exact_code!r}, expected "
+                f"{expected_test_code!r}."
             )
 
         landing.click_continue()
@@ -619,8 +643,12 @@ class SPLLTPlugin:
         self,
         ctx,
         scenario_name: str,
+        test_code: str,
     ) -> dict:
-        expected = expected_scenario_payload(scenario_name)
+        expected = expected_scenario_payload(
+            scenario_name,
+            test_code=test_code,
+        )
         blocks = []
 
         for block_index in range(SPLLT_BLOCK_COUNT):
@@ -635,6 +663,7 @@ class SPLLTPlugin:
                 ctx,
                 scenario_name=scenario_name,
                 block_index=block_index,
+                test_code=test_code,
             )
 
             blocks.append(block_result)
@@ -665,8 +694,11 @@ class SPLLTPlugin:
         summary = []
         scenario_records = []
 
+        active_test_code = self._active_test_code(ctx)
+
         ctx.logger.info(
-            "SPLLT functional suite starting with %d scenarios",
+            "SPLLT functional suite starting test=%s with %d scenarios",
+            active_test_code,
             len(SPLLT_SCENARIO_ORDER),
         )
 
@@ -686,6 +718,7 @@ class SPLLTPlugin:
                 payload = self._run_one_scenario(
                     ctx,
                     scenario_name,
+                    test_code=active_test_code,
                 )
                 scenario_status = "PASS"
 
@@ -711,7 +744,10 @@ class SPLLTPlugin:
                 )
 
                 payload = {
-                    **expected_scenario_payload(scenario_name),
+                    **expected_scenario_payload(
+                        scenario_name,
+                        test_code=active_test_code,
+                    ),
                     "selenium_status": "FAIL",
                     "data_validation": "PENDING",
                     "observed_interactions": [],
@@ -738,7 +774,7 @@ class SPLLTPlugin:
             )
 
             record = {
-                "test_name": self.exact_code,
+                "test_name": active_test_code,
                 "status": scenario_status,
                 "reason": reason,
                 "errors": (
@@ -769,6 +805,7 @@ class SPLLTPlugin:
                     self._restart_for_next_scenario(
                         ctx,
                         next_scenario,
+                        expected_test_code=active_test_code,
                     )
 
                 except Exception as exc:
@@ -791,7 +828,7 @@ class SPLLTPlugin:
                         )
 
                         scenario_records.append({
-                            "test_name": self.exact_code,
+                            "test_name": active_test_code,
                             "status": "FAIL",
                             "reason": missing_reason,
                             "errors": [fatal_error],
@@ -828,7 +865,7 @@ class SPLLTPlugin:
         summary_path.write_text(
             json.dumps(
                 {
-                    "test": self.exact_code,
+                    "test": active_test_code,
                     "internal_strategy": strategy,
                     "scenario_order": SPLLT_SCENARIO_ORDER,
                     "results": summary,
