@@ -8,6 +8,7 @@ from selenium.common.exceptions import (
     JavascriptException,
     NoSuchWindowException,
     StaleElementReferenceException,
+    TimeoutException,
     WebDriverException,
 )
 from selenium.webdriver import ActionChains
@@ -51,7 +52,7 @@ class PVT6Plugin:
     MAX_PRACTICE_TRIALS = 50
     MAX_TEST_TRIALS = 200
 
-    # Six intentionally simple validation strategies.
+    # Eight validation strategies.
     #
     # under_350:
     #     Respond at 300 ms on every scored trial.
@@ -71,7 +72,18 @@ class PVT6Plugin:
     #
     # first5_then_stop:
     #     Respond normally to the first 5 scored trials, then provide no more
-    #     input and allow the remaining PVT trials to time out naturally.
+    #     input on subsequent visible trials while CNB continues to advance.
+    #
+    # practice_stop_after_7:
+    #     Respond normally to the first 7 practice trials, then simulate the
+    #     participant abandoning the session completely. No further keys or
+    #     clicks are sent. Observe for up to 25 minutes to see whether CNB
+    #     terminates the test/session on its own.
+    #
+    # main_random_stop:
+    #     Complete practice normally, begin the scored test, respond normally
+    #     for a randomly chosen number of trials, then abandon the session.
+    #     No further keys or clicks are sent. Observe for up to 25 minutes.
     SUPPORTED_STRATEGIES = {
         "under_350",
         "first5_false_starts",
@@ -79,10 +91,22 @@ class PVT6Plugin:
         "over_500",
         "random",
         "first5_then_stop",
+        "practice_stop_after_7",
+        "main_random_stop",
     }
 
     FALSE_START_DELAY_MS = 500
     NO_INPUT_CLEAR_SECONDS = 35.0
+
+    PRACTICE_ABANDON_AFTER_RESPONSES = 7
+    MAIN_RANDOM_STOP_MIN_RESPONSES = 3
+    MAIN_RANDOM_STOP_MAX_RESPONSES = 10
+
+    # The abandonment scenarios intentionally do nothing after the participant
+    # stops responding. This is a scenario timeout, not a PVT trial timeout.
+    ABANDONMENT_TIMEOUT_SECONDS = 25 * 60
+    ABANDONMENT_POLL_SECONDS = 0.5
+    ABANDONMENT_PROGRESS_LOG_SECONDS = 60.0
 
     # ------------------------------------------------------------------
     # Generic helpers
@@ -379,6 +403,146 @@ return {
         )
 
     # ------------------------------------------------------------------
+    # Participant-abandonment observation
+    # ------------------------------------------------------------------
+
+    def _wait_for_unattended_termination(
+        self,
+        ctx,
+        *,
+        scenario: str,
+        phase: str,
+        responses_before_stop: int,
+        timeout: float | None = None,
+    ) -> dict:
+        """
+        Simulate a participant who has left and never returns.
+
+        IMPORTANT:
+        Once this method starts it sends NO keys and performs NO clicks.
+        It only polls page state to see whether CNB terminates or advances the
+        session on its own.
+
+        A self-termination/post-test transition is treated as a successful
+        observation. If no such transition occurs within 25 minutes, the
+        scenario fails with an explicit timeout.
+        """
+
+        timeout = (
+            float(timeout)
+            if timeout is not None
+            else float(self.ABANDONMENT_TIMEOUT_SECONDS)
+        )
+
+        started = time.perf_counter()
+        next_progress_log = (
+            started + self.ABANDONMENT_PROGRESS_LOG_SECONDS
+        )
+        last_state = {}
+
+        ctx.logger.info(
+            "PVT abandonment started: scenario=%s phase=%s "
+            "responses_before_stop=%d timeout=%.0fs. "
+            "No further keyboard or mouse input will be sent.",
+            scenario,
+            phase,
+            responses_before_stop,
+            timeout,
+        )
+
+        while (time.perf_counter() - started) < timeout:
+            try:
+                state = self._state_snapshot(ctx)
+                last_state = state or {}
+
+            except NoSuchWindowException:
+                elapsed = time.perf_counter() - started
+
+                ctx.logger.info(
+                    "PVT unattended session ended after %.1fs: "
+                    "browser window closed or navigated away.",
+                    elapsed,
+                )
+
+                return {
+                    "scenario": scenario,
+                    "phase": phase,
+                    "responses_before_stop": responses_before_stop,
+                    "outcome": "self_terminated",
+                    "reason": "browser_window_closed_or_navigated",
+                    "unattended_wait_seconds": round(elapsed, 2),
+                }
+
+            except (
+                JavascriptException,
+                StaleElementReferenceException,
+                WebDriverException,
+            ):
+                # Navigation may briefly invalidate the old document. Do not
+                # send input; simply wait for the new page to become readable.
+                time.sleep(self.ABANDONMENT_POLL_SECONDS)
+                continue
+
+            if last_state.get("postTest"):
+                elapsed = time.perf_counter() - started
+
+                reason = (
+                    "battery_complete"
+                    if last_state.get("batteryComplete")
+                    else "post_test_transition"
+                )
+
+                ctx.logger.info(
+                    "PVT unattended session self-terminated after %.1fs: %s",
+                    elapsed,
+                    reason,
+                )
+
+                return {
+                    "scenario": scenario,
+                    "phase": phase,
+                    "responses_before_stop": responses_before_stop,
+                    "outcome": "self_terminated",
+                    "reason": reason,
+                    "unattended_wait_seconds": round(elapsed, 2),
+                    "final_url": last_state.get("url"),
+                }
+
+            now = time.perf_counter()
+
+            if now >= next_progress_log:
+                elapsed = now - started
+
+                ctx.logger.info(
+                    "PVT abandonment still waiting after %.1f minutes: "
+                    "scenario=%s phase=%s begin_test=%s "
+                    "box_visible=%s numeric_value=%r url=%s",
+                    elapsed / 60.0,
+                    scenario,
+                    phase,
+                    bool(last_state.get("beginTest")),
+                    bool(last_state.get("boxVisible")),
+                    last_state.get("numericValue"),
+                    last_state.get("url"),
+                )
+
+                next_progress_log = (
+                    now + self.ABANDONMENT_PROGRESS_LOG_SECONDS
+                )
+
+            time.sleep(self.ABANDONMENT_POLL_SECONDS)
+
+        elapsed = time.perf_counter() - started
+
+        raise TimeoutException(
+            "PVT abandonment scenario did not self-terminate within "
+            f"{timeout / 60.0:.1f} minutes. "
+            f"scenario={scenario!r}; phase={phase!r}; "
+            f"responses_before_stop={responses_before_stop}; "
+            f"last_state={last_state!r}"
+        )
+
+    # ------------------------------------------------------------------
     # Response timing
     # ------------------------------------------------------------------
 
@@ -597,6 +761,64 @@ return {
                     trial_label=f"practice_{trial_index}",
                 )
             )
+
+    def _run_practice_stop_after_7(
+        self,
+        ctx,
+    ) -> tuple[list[dict], dict]:
+        """
+        Respond normally to exactly seven observed practice trials, then stop
+        all participant input and watch for unattended termination.
+        """
+
+        observations = []
+        trial_index = 0
+        target_responses = self.PRACTICE_ABANDON_AFTER_RESPONSES
+
+        while trial_index < target_responses:
+            event = self._wait_for_phase_event(
+                ctx,
+                phase="practice",
+                allow_task_end=False,
+            )
+
+            if event.get("type") == "begin_test":
+                raise RuntimeError(
+                    "PVT practice ended before the abandonment scenario could "
+                    f"reach {target_responses} responses; observed "
+                    f"{trial_index}."
+                )
+
+            if event.get("type") != "counter":
+                raise RuntimeError(
+                    f"Unexpected PVT practice event: {event!r}"
+                )
+
+            trial_index += 1
+
+            observation = self._respond_to_counter_event(
+                ctx,
+                event=event,
+                delay_ms=self.PRACTICE_RT_MS,
+                trial_label=f"practice_{trial_index}",
+            )
+            observation["action"] = "respond_before_abandonment"
+            observation["strategy"] = "practice_stop_after_7"
+            observations.append(observation)
+
+        ctx.logger.info(
+            "PVT practice abandonment point reached after %d responses.",
+            trial_index,
+        )
+
+        abandonment = self._wait_for_unattended_termination(
+            ctx,
+            scenario="practice_stop_after_7",
+            phase="practice",
+            responses_before_stop=trial_index,
+        )
+
+        return observations, abandonment
 
     def _enter_main_test(self, ctx) -> None:
         """
@@ -880,6 +1102,86 @@ return {
             f"{self.NO_INPUT_CLEAR_SECONDS:.1f}s."
         )
 
+    def _run_main_random_stop(
+        self,
+        ctx,
+    ) -> tuple[list[dict], dict]:
+        """
+        Respond normally for a random number of scored trials, then stop all
+        participant input and observe whether CNB terminates the session.
+
+        The random stop point is chosen once per run and is logged/stored.
+        """
+
+        stop_after = random.randint(
+            self.MAIN_RANDOM_STOP_MIN_RESPONSES,
+            self.MAIN_RANDOM_STOP_MAX_RESPONSES,
+        )
+
+        ctx.logger.info(
+            "PVT main_random_stop selected stop point: "
+            "%d completed scored responses.",
+            stop_after,
+        )
+
+        observations = []
+        trial_index = 0
+
+        while trial_index < stop_after:
+            event = self._wait_for_phase_event(
+                ctx,
+                phase="main test",
+                allow_task_end=True,
+            )
+
+            if event.get("type") == "task_end":
+                raise RuntimeError(
+                    "PVT main test ended before the random abandonment point "
+                    f"was reached. stop_after={stop_after}; "
+                    f"observed={trial_index}; reason={event.get('reason')!r}"
+                )
+
+            if event.get("type") == "begin_test":
+                # We should already have clicked BEGIN TEST before entering
+                # this method. Do not interpret this as a participant action.
+                raise RuntimeError(
+                    "Unexpected BEGIN TEST screen while running "
+                    "main_random_stop."
+                )
+
+            if event.get("type") != "counter":
+                raise RuntimeError(
+                    f"Unexpected PVT main-test event: {event!r}"
+                )
+
+            trial_index += 1
+            trial_label = f"test_{trial_index}"
+
+            observation = self._respond_to_counter_event(
+                ctx,
+                event=event,
+                delay_ms=300,
+                trial_label=trial_label,
+            )
+            observation["action"] = "respond_before_abandonment"
+            observation["strategy"] = "main_random_stop"
+            observations.append(observation)
+
+        ctx.logger.info(
+            "PVT main-test abandonment point reached after %d responses.",
+            trial_index,
+        )
+
+        abandonment = self._wait_for_unattended_termination(
+            ctx,
+            scenario="main_random_stop",
+            phase="main_test",
+            responses_before_stop=trial_index,
+        )
+        abandonment["random_stop_after_responses"] = stop_after
+
+        return observations, abandonment
+
     def _run_main_test(
         self,
         ctx,
@@ -1002,6 +1304,8 @@ return {
         errors = []
 
         try:
+            strategy = self._validate_strategy(strategy)
+
             ctx.logger.info(
                 "PVT 6.00 starting test=%s strategy=%s",
                 self.exact_code,
@@ -1010,6 +1314,35 @@ return {
 
             self._enter_practice(ctx)
 
+            # Scenario 7:
+            # Participant responds to seven practice trials and then abandons
+            # the session completely. We never advance BEGIN TEST ourselves.
+            if strategy == "practice_stop_after_7":
+                (
+                    practice_observations,
+                    abandonment,
+                ) = self._run_practice_stop_after_7(ctx)
+
+                ctx.pvt_observations = {
+                    "strategy": strategy,
+                    "practice_count": len(practice_observations),
+                    "test_count": 0,
+                    "practice": practice_observations,
+                    "test": [],
+                    "abandonment": abandonment,
+                }
+
+                ctx.logger.info(
+                    "PVT practice_stop_after_7 completed: %s",
+                    abandonment,
+                )
+
+                return TestRunResult(
+                    status="PASS",
+                    errors=[],
+                )
+
+            # All other scenarios complete practice normally.
             practice_observations = self._run_practice(ctx)
 
             ctx.logger.info(
@@ -1019,6 +1352,35 @@ return {
 
             self._enter_main_test(ctx)
 
+            # Scenario 8:
+            # Participant completes practice and begins the scored test, then
+            # abandons after a randomly selected number of normal responses.
+            if strategy == "main_random_stop":
+                (
+                    test_observations,
+                    abandonment,
+                ) = self._run_main_random_stop(ctx)
+
+                ctx.pvt_observations = {
+                    "strategy": strategy,
+                    "practice_count": len(practice_observations),
+                    "test_count": len(test_observations),
+                    "practice": practice_observations,
+                    "test": test_observations,
+                    "abandonment": abandonment,
+                }
+
+                ctx.logger.info(
+                    "PVT main_random_stop completed: %s",
+                    abandonment,
+                )
+
+                return TestRunResult(
+                    status="PASS",
+                    errors=[],
+                )
+
+            # Existing six scenarios are unchanged.
             test_observations = self._run_main_test(
                 ctx,
                 strategy=strategy,
@@ -1054,3 +1416,4 @@ return {
             status="PASS",
             errors=[],
         )
+
