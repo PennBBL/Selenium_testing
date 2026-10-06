@@ -664,14 +664,23 @@ def main():
     from workflows.scrape_completed_tests import scrape_completed_tests
     from scraping.spllt_scraper import scrape_spllt_records
 
+    # Import the legacy single-ID lookup independently so that a missing
+    # list-based helper does not accidentally disable it.
     try:
-        from scraping.base_scraper import (
-            get_datasetid_for_subid,
-            get_datasetids_for_subid,
-        )
+        from scraping.base_scraper import get_datasetid_for_subid
     except Exception:
         get_datasetid_for_subid = None
-        get_datasetids_for_subid = None
+
+    # Prefer a generic list-based lookup from base_scraper. Older repository
+    # versions do not define it there, so fall back to the SPLLT scraper,
+    # which already contains the session-list dataset-ID extraction logic.
+    try:
+        from scraping.base_scraper import get_datasetids_for_subid
+    except Exception:
+        try:
+            from scraping.spllt_scraper import get_datasetids_for_subid
+        except Exception:
+            get_datasetids_for_subid = None
 
     # Scrapers currently keep URL globals, so update them only after
     # the selected environment has been loaded.
@@ -926,7 +935,9 @@ def main():
         ):
             logger.warning(
                 "List-based dataset lookup is unavailable; "
-                "falling back to the legacy single-dataset lookup."
+                "falling back to the legacy single-dataset lookup. "
+                "Legacy lookup available=%s",
+                get_datasetid_for_subid is not None,
             )
 
             datasetid, dataset_lookup_error = lookup_datasetid(
