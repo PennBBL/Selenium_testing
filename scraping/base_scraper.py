@@ -233,7 +233,7 @@ def open_scores_page(driver, subid):
     field.send_keys(subid)
 
     try:
-        Select(driver.find_element(By.NAME, "multi_siteid")).select_by_value("TEST")
+        Select(driver.find_element(By.NAME, "multi_siteid")).select_by_value("SELENIUM")
     except Exception:
         pass
 
