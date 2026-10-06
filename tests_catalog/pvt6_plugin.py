@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import random
-import re
 import time
 
 from selenium.common.exceptions import (
@@ -22,26 +21,49 @@ from tests_catalog.common import TestRunResult
 
 class PVT6Plugin:
     """
-    Dynamic PVT runner for pvt-b-6.00-ff.
+    Shared dynamic PVT 6.00 runner for:
 
-    Key behavior:
-    - Does not hard-code practice or scored trial counts.
-    - The red box may remain visible while empty between trials.
-    - A response is sent as soon as ANY numeric text appears inside .pvt-stimulus.
-      This intentionally does not depend on .four-digit-stimulus.
+        pvt-b-6.00-ff
+            - instruction navigation uses the existing mixed SPACE/Continue flow
+            - trial responses use SPACE
+
+        pvt-b-btn-6.00-ff
+            - all internal instruction pages use Click Here to Continue
+            - trial responses click the .pvt-trial area
+
+    The two versions share the same timing strategies, dynamic practice/main
+    detection, false-start scenarios, no-input scenario, and abandonment
+    scenarios.
+
+    Important behavior:
+    - Practice/scored trial counts are not hard-coded.
+    - The red stimulus box may remain visible while empty between trials.
+    - A trial onset is detected when numeric text appears inside .pvt-stimulus.
     - Practice ends when the BEGIN TEST screen appears.
-    - Main test ends when the red stimulus box disappears and stays gone, or when
-      CNB transitions to an obvious post-test page.
-    - Uses short synchronous JavaScript state snapshots instead of a long
-      execute_async_script call. This is more robust when the page navigates at
-      the end of the task, including in headless Chrome.
+    - Main test ends when CNB transitions away from the active PVT task.
     """
 
     exact_code = "pvt-b-6.00-ff"
+    exact_codes = {
+        "pvt-b-6.00-ff",
+        "pvt-b-btn-6.00-ff",
+    }
+
+    VARIANTS = {
+        "pvt-b-6.00-ff": {
+            "response_mode": "space",
+            "instruction_mode": "mixed",
+        },
+        "pvt-b-btn-6.00-ff": {
+            "response_mode": "click",
+            "instruction_mode": "continue",
+        },
+    }
 
     PRACTICE_RT_MS = 300
 
     STIMULUS_CONTAINER_SELECTOR = ".pvt-stimulus"
+    TRIAL_CLICK_TARGET_SELECTOR = ".pvt-trial"
     FEEDBACK_SELECTOR = ".pvt-feedback"
 
     PHASE_EVENT_TIMEOUT_SECONDS = 35.0
@@ -52,38 +74,6 @@ class PVT6Plugin:
     MAX_PRACTICE_TRIALS = 50
     MAX_TEST_TRIALS = 200
 
-    # Eight validation strategies.
-    #
-    # under_350:
-    #     Respond at 300 ms on every scored trial.
-    #
-    # first5_false_starts:
-    #     For the first 5 scored opportunities, press SPACE before the number
-    #     appears. After that, respond normally at 300 ms.
-    #
-    # mid_355_500:
-    #     Respond at 425 ms on every scored trial.
-    #
-    # over_500:
-    #     Respond at 750 ms on every scored trial.
-    #
-    # random:
-    #     Random response latency between 150 and 1000 ms on every trial.
-    #
-    # first5_then_stop:
-    #     Respond normally to the first 5 scored trials, then provide no more
-    #     input on subsequent visible trials while CNB continues to advance.
-    #
-    # practice_stop_after_7:
-    #     Respond normally to the first 7 practice trials, then simulate the
-    #     participant abandoning the session completely. No further keys or
-    #     clicks are sent. Observe for up to 25 minutes to see whether CNB
-    #     terminates the test/session on its own.
-    #
-    # main_random_stop:
-    #     Complete practice normally, begin the scored test, respond normally
-    #     for a randomly chosen number of trials, then abandon the session.
-    #     No further keys or clicks are sent. Observe for up to 25 minutes.
     SUPPORTED_STRATEGIES = {
         "under_350",
         "first5_false_starts",
@@ -102,11 +92,36 @@ class PVT6Plugin:
     MAIN_RANDOM_STOP_MIN_RESPONSES = 3
     MAIN_RANDOM_STOP_MAX_RESPONSES = 10
 
-    # The abandonment scenarios intentionally do nothing after the participant
-    # stops responding. This is a scenario timeout, not a PVT trial timeout.
     ABANDONMENT_TIMEOUT_SECONDS = 25 * 60
     ABANDONMENT_POLL_SECONDS = 0.5
     ABANDONMENT_PROGRESS_LOG_SECONDS = 60.0
+
+    # ------------------------------------------------------------------
+    # Variant helpers
+    # ------------------------------------------------------------------
+
+    def _active_test_code(self, ctx) -> str:
+        code = str(
+            getattr(ctx, "exact_code", None)
+            or self.exact_code
+        ).strip().lower()
+
+        if code not in self.exact_codes:
+            raise RuntimeError(
+                f"Unsupported PVT 6 test code {code!r}. "
+                f"Expected one of {sorted(self.exact_codes)}."
+            )
+
+        return code
+
+    def _variant(self, ctx) -> dict:
+        return self.VARIANTS[self._active_test_code(ctx)]
+
+    def _response_mode(self, ctx) -> str:
+        return str(self._variant(ctx)["response_mode"])
+
+    def _instruction_mode(self, ctx) -> str:
+        return str(self._variant(ctx)["instruction_mode"])
 
     # ------------------------------------------------------------------
     # Generic helpers
@@ -118,7 +133,12 @@ class PVT6Plugin:
         except Exception:
             return ""
 
-    def _wait_for_text(self, ctx, text: str, timeout: float = 20.0) -> None:
+    def _wait_for_text(
+        self,
+        ctx,
+        text: str,
+        timeout: float = 20.0,
+    ) -> None:
         wanted = text.lower()
 
         WebDriverWait(
@@ -137,7 +157,84 @@ class PVT6Plugin:
         try:
             ActionChains(ctx.driver).send_keys(Keys.SPACE).perform()
         except Exception:
-            ctx.driver.find_element(By.TAG_NAME, "body").send_keys(Keys.SPACE)
+            ctx.driver.find_element(
+                By.TAG_NAME,
+                "body",
+            ).send_keys(Keys.SPACE)
+
+    def _click_trial(self, ctx, label: str) -> None:
+        """
+        Click the response target used by pvt-b-btn-6.00-ff.
+
+        Confirmed active-trial HTML:
+            <div class="pvt-trial" style="cursor: pointer; ...">
+
+        Click the whole trial area rather than the changing numeric span.
+        """
+        ctx.logger.info("PVT clicking trial area: %s", label)
+
+        trial = WebDriverWait(
+            ctx.driver,
+            5,
+            poll_frequency=0.02,
+        ).until(
+            lambda d: self._visible_click_target(d)
+        )
+
+        try:
+            trial.click()
+        except Exception:
+            ctx.driver.execute_script(
+                "arguments[0].click();",
+                trial,
+            )
+
+    def _visible_click_target(self, driver):
+        elements = driver.find_elements(
+            By.CSS_SELECTOR,
+            self.TRIAL_CLICK_TARGET_SELECTOR,
+        )
+
+        for element in elements:
+            try:
+                if element.is_displayed() and element.is_enabled():
+                    return element
+            except Exception:
+                continue
+
+        return False
+
+    def _send_trial_response(
+        self,
+        ctx,
+        label: str,
+    ) -> None:
+        mode = self._response_mode(ctx)
+
+        if mode == "space":
+            self._press_space(ctx, label)
+            return
+
+        if mode == "click":
+            self._click_trial(ctx, label)
+            return
+
+        raise RuntimeError(
+            f"Unknown PVT response mode {mode!r}."
+        )
+
+    def _click_continue(
+        self,
+        ctx,
+        label: str,
+        timeout: float = 10.0,
+    ) -> None:
+        click_continue(
+            ctx,
+            label=label,
+            timeout=timeout,
+            delay=0.5,
+        )
 
     def _click_continue_if_present(
         self,
@@ -146,11 +243,10 @@ class PVT6Plugin:
         timeout: float = 6.0,
     ) -> bool:
         try:
-            click_continue(
+            self._click_continue(
                 ctx,
                 label=f"PVT {label}",
                 timeout=timeout,
-                delay=0.5,
             )
             return True
         except Exception:
@@ -172,10 +268,10 @@ class PVT6Plugin:
 
     def _state_snapshot(self, ctx) -> dict:
         """
-        Read the current PVT state in one short JS command.
+        Read the current PVT state in one short JavaScript command.
 
-        Numeric onset is based on the text inside .pvt-stimulus itself, not on
-        a digit-count-specific class such as .four-digit-stimulus.
+        Numeric onset is based on text inside .pvt-stimulus itself rather than
+        depending exclusively on the .four-digit-stimulus class.
         """
 
         script = r"""
@@ -211,8 +307,6 @@ if (box) {
     ).trim();
 }
 
-// Find the first numeric text currently rendered inside the PVT stimulus box.
-// Examples this catches: "1", "27", "305", "1004".
 const numericMatch = boxText.match(/\d+/);
 const numericValue = numericMatch ? numericMatch[0] : null;
 
@@ -263,6 +357,7 @@ return {
 
                 if state.get("boxVisible"):
                     return
+
             except (
                 JavascriptException,
                 StaleElementReferenceException,
@@ -291,8 +386,8 @@ return {
           - BEGIN TEST,
           - or main-test completion.
 
-        The key detail is that the EMPTY red box is not a trial onset.
-        We only return "counter" when numeric text appears inside the box.
+        The empty red box is not a trial onset. A "counter" event is returned
+        only when numeric text appears inside the stimulus container.
         """
 
         timeout = timeout or self.PHASE_EVENT_TIMEOUT_SECONDS
@@ -310,6 +405,7 @@ return {
             try:
                 state = self._state_snapshot(ctx)
                 last_state = state or {}
+
             except NoSuchWindowException:
                 if allow_task_end:
                     return {
@@ -320,21 +416,22 @@ return {
                         ) * 1000.0,
                     }
                 raise
+
             except (
                 JavascriptException,
                 StaleElementReferenceException,
                 WebDriverException,
             ) as exc:
-                # A page transition can briefly invalidate the old document.
-                # Give the new page a moment to become queryable.
                 if allow_task_end:
                     time.sleep(0.05)
+
                     try:
                         state = self._state_snapshot(ctx)
                         last_state = state or {}
                     except Exception:
                         time.sleep(0.05)
                         continue
+
                 else:
                     raise RuntimeError(
                         f"PVT state read failed during {phase}: {exc}"
@@ -372,6 +469,7 @@ return {
 
                 if last_state.get("boxVisible"):
                     container_absent_since = None
+
                 else:
                     now = time.perf_counter()
 
@@ -416,16 +514,9 @@ return {
         timeout: float | None = None,
     ) -> dict:
         """
-        Simulate a participant who has left and never returns.
+        Simulate a participant who leaves and never returns.
 
-        IMPORTANT:
-        Once this method starts it sends NO keys and performs NO clicks.
-        It only polls page state to see whether CNB terminates or advances the
-        session on its own.
-
-        A self-termination/post-test transition is treated as a successful
-        observation. If no such transition occurs within 25 minutes, the
-        scenario fails with an explicit timeout.
+        Once this method starts it sends NO keyboard or mouse input.
         """
 
         timeout = (
@@ -478,8 +569,6 @@ return {
                 StaleElementReferenceException,
                 WebDriverException,
             ):
-                # Navigation may briefly invalidate the old document. Do not
-                # send input; simply wait for the new page to become readable.
                 time.sleep(self.ABANDONMENT_POLL_SECONDS)
                 continue
 
@@ -557,6 +646,7 @@ return {
 
             if remaining > 0.025:
                 time.sleep(remaining - 0.010)
+
             elif remaining > 0.004:
                 time.sleep(0.001)
 
@@ -574,9 +664,8 @@ return {
 
                 if not state.get("numericValue"):
                     return
+
             except Exception:
-                # Navigation at the end of the task also means the old counter
-                # is no longer active.
                 return
 
             time.sleep(0.01)
@@ -596,37 +685,41 @@ return {
     ) -> dict:
         if event.get("type") != "counter":
             raise RuntimeError(
-                f"PVT expected counter event for {trial_label}, got {event!r}"
+                f"PVT expected counter event for {trial_label}, "
+                f"got {event!r}"
             )
+
+        response_mode = self._response_mode(ctx)
 
         ctx.logger.info(
             "PVT counter detected for %s: value=%s "
-            "box_text=%r wait_elapsed_ms=%.1f",
+            "box_text=%r wait_elapsed_ms=%.1f response_mode=%s",
             trial_label,
             event.get("value"),
             event.get("box_text", ""),
             float(event.get("waitElapsedMs") or 0.0),
+            response_mode,
         )
 
         local_detection_time = time.perf_counter()
 
         self._wait_response_delay(delay_ms)
 
-        before_press = time.perf_counter()
+        before_send = time.perf_counter()
 
-        self._press_space(
+        self._send_trial_response(
             ctx,
             f"{trial_label} target={delay_ms}ms",
         )
 
-        after_press = time.perf_counter()
+        after_send = time.perf_counter()
 
         local_wait_ms = (
-            before_press - local_detection_time
+            before_send - local_detection_time
         ) * 1000.0
 
         send_duration_ms = (
-            after_press - before_press
+            after_send - before_send
         ) * 1000.0
 
         time.sleep(0.05)
@@ -635,11 +728,12 @@ return {
         ctx.logger.info(
             "PVT response %s: requested=%dms "
             "local_wait=%.1fms webdriver_send=%.1fms "
-            "feedback=%r",
+            "response_mode=%s feedback=%r",
             trial_label,
             delay_ms,
             local_wait_ms,
             send_duration_ms,
+            response_mode,
             feedback,
         )
 
@@ -654,6 +748,7 @@ return {
             "requested_delay_ms": delay_ms,
             "local_wait_ms": round(local_wait_ms, 2),
             "webdriver_send_ms": round(send_duration_ms, 2),
+            "response_mode": response_mode,
             "counter_value_at_detection": event.get("value"),
             "box_text_at_detection": event.get("box_text", ""),
             "wait_elapsed_ms": round(
@@ -667,16 +762,15 @@ return {
     # Instructions
     # ------------------------------------------------------------------
 
-    def _enter_practice(self, ctx) -> None:
+    def _enter_practice_space_variant(self, ctx) -> None:
         """
-        Enter the PVT 6.00 practice block.
+        Existing pvt-b-6.00-ff flow.
 
-        run_battery has already clicked the outer CNB landing-page Continue.
+        run_battery has already clicked the outer landing-page Continue.
 
-        Confirmed PVT 6.00 flow:
             general instructions -> SPACE
             practice instructions -> SPACE
-            BEGIN PRACTICE -> click Continue
+            BEGIN PRACTICE -> Continue button
         """
 
         self._wait_for_text(
@@ -684,6 +778,7 @@ return {
             "watch the red rectangle",
             timeout=20,
         )
+
         self._press_space(
             ctx,
             "instructions1 -> instructions2",
@@ -694,6 +789,7 @@ return {
             "We will first do a practice trial",
             timeout=20,
         )
+
         self._press_space(
             ctx,
             "instructions2 -> begin practice",
@@ -705,12 +801,69 @@ return {
             timeout=20,
         )
 
-        click_continue(
+        self._click_continue(
             ctx,
             label="PVT 6.00 BEGIN PRACTICE",
             timeout=10,
-            delay=0.5,
         )
+
+    def _enter_practice_click_variant(self, ctx) -> None:
+        """
+        pvt-b-btn-6.00-ff flow.
+
+        The user confirmed all internal instructional pages use a
+        "Click here to continue" button. Do not send SPACE on this variant.
+        """
+
+        self._wait_for_text(
+            ctx,
+            "watch the red rectangle",
+            timeout=20,
+        )
+
+        self._click_continue(
+            ctx,
+            label="PVT BTN instructions1 -> instructions2",
+            timeout=10,
+        )
+
+        self._wait_for_text(
+            ctx,
+            "We will first do a practice trial",
+            timeout=20,
+        )
+
+        self._click_continue(
+            ctx,
+            label="PVT BTN instructions2 -> begin practice",
+            timeout=10,
+        )
+
+        self._wait_for_text(
+            ctx,
+            "BEGIN PRACTICE",
+            timeout=20,
+        )
+
+        self._click_continue(
+            ctx,
+            label="PVT BTN BEGIN PRACTICE",
+            timeout=10,
+        )
+
+    def _enter_practice(self, ctx) -> None:
+        mode = self._instruction_mode(ctx)
+
+        if mode == "mixed":
+            self._enter_practice_space_variant(ctx)
+
+        elif mode == "continue":
+            self._enter_practice_click_variant(ctx)
+
+        else:
+            raise RuntimeError(
+                f"Unknown PVT instruction mode {mode!r}."
+            )
 
         self._wait_for_stimulus_container(
             ctx,
@@ -766,11 +919,6 @@ return {
         self,
         ctx,
     ) -> tuple[list[dict], dict]:
-        """
-        Respond normally to exactly seven observed practice trials, then stop
-        all participant input and watch for unattended termination.
-        """
-
         observations = []
         trial_index = 0
         target_responses = self.PRACTICE_ABANDON_AFTER_RESPONSES
@@ -784,9 +932,9 @@ return {
 
             if event.get("type") == "begin_test":
                 raise RuntimeError(
-                    "PVT practice ended before the abandonment scenario could "
-                    f"reach {target_responses} responses; observed "
-                    f"{trial_index}."
+                    "PVT practice ended before the abandonment scenario "
+                    f"could reach {target_responses} responses; "
+                    f"observed {trial_index}."
                 )
 
             if event.get("type") != "counter":
@@ -802,6 +950,7 @@ return {
                 delay_ms=self.PRACTICE_RT_MS,
                 trial_label=f"practice_{trial_index}",
             )
+
             observation["action"] = "respond_before_abandonment"
             observation["strategy"] = "practice_stop_after_7"
             observations.append(observation)
@@ -822,11 +971,12 @@ return {
 
     def _enter_main_test(self, ctx) -> None:
         """
-        Start the scored PVT 6.00 block.
+        Both PVT 6 variants reach a BEGIN TEST instruction page.
 
-        Practice terminates when the BEGIN TEST screen appears. Unlike PVT
-        5.00, PVT 6.00 advances from BEGIN TEST by clicking the Continue
-        button.
+        - regular pvt-b-6.00-ff: Continue button
+        - pvt-b-btn-6.00-ff: Continue button
+
+        Therefore no trial response helper is used here.
         """
 
         self._wait_for_text(
@@ -835,13 +985,15 @@ return {
             timeout=10,
         )
 
-        ctx.logger.info("PVT 6.00 BEGIN TEST screen detected.")
+        ctx.logger.info(
+            "PVT BEGIN TEST screen detected for %s.",
+            self._active_test_code(ctx),
+        )
 
-        click_continue(
+        self._click_continue(
             ctx,
             label="PVT 6.00 BEGIN TEST",
             timeout=10,
-            delay=0.5,
         )
 
         self._wait_for_stimulus_container(
@@ -851,7 +1003,7 @@ return {
         )
 
     # ------------------------------------------------------------------
-    # Dynamic main test / six validation strategies
+    # Dynamic main test / eight validation strategies
     # ------------------------------------------------------------------
 
     def _validate_strategy(self, strategy: str) -> str:
@@ -862,7 +1014,8 @@ return {
         if strategy not in self.SUPPORTED_STRATEGIES:
             raise ValueError(
                 f"Unsupported PVT strategy {strategy!r}. "
-                f"Supported strategies: {sorted(self.SUPPORTED_STRATEGIES)}"
+                f"Supported strategies: "
+                f"{sorted(self.SUPPORTED_STRATEGIES)}"
             )
 
         return strategy
@@ -885,15 +1038,14 @@ return {
             return random.randint(150, 1000)
 
         if strategy == "first5_false_starts":
-            # After the first five false-start trials, use normal responses.
             return 300
 
         if strategy == "first5_then_stop":
-            # The first five are normal responses.
             return 300
 
         raise ValueError(
-            f"No response-delay rule for PVT strategy {strategy!r}."
+            f"No response-delay rule for PVT strategy "
+            f"{strategy!r}."
         )
 
     def _wait_for_feedback_cycle_after_false_start(
@@ -903,11 +1055,6 @@ return {
         trial_label: str,
         timeout: float = 4.0,
     ) -> str:
-        """
-        Give CNB time to register the false start and move into the next
-        foreperiod. We prefer observing feedback, but do not require it.
-        """
-
         started = time.perf_counter()
         seen_feedback = ""
         feedback_seen_at = None
@@ -920,7 +1067,6 @@ return {
                     seen_feedback = feedback
                     feedback_seen_at = time.perf_counter()
 
-                # Once feedback has been visible briefly, wait for it to clear.
                 if (
                     feedback_seen_at is not None
                     and time.perf_counter() - feedback_seen_at >= 0.15
@@ -929,7 +1075,8 @@ return {
 
             elif seen_feedback:
                 ctx.logger.info(
-                    "PVT false-start feedback cycle completed for %s: %r",
+                    "PVT false-start feedback cycle completed for "
+                    "%s: %r",
                     trial_label,
                     seen_feedback,
                 )
@@ -937,9 +1084,6 @@ return {
 
             time.sleep(0.02)
 
-        # If the page does not expose a visible feedback cycle, use a
-        # conservative delay. The observed PVT foreperiod is much longer than
-        # this, so this still keeps the next intentional press before onset.
         if not seen_feedback:
             time.sleep(0.75)
 
@@ -952,19 +1096,21 @@ return {
         trial_label: str,
     ) -> dict:
         """
-        Intentionally press SPACE while the red box is still empty.
+        Intentionally respond while the trial area is active but the numeric
+        counter has not appeared.
 
-        The 500 ms pre-press wait continuously verifies that the numeric
-        stimulus has not appeared. If onset occurs unexpectedly early, the
-        method falls back to a normal 300 ms response instead of corrupting
-        the requested false-start scenario.
+        Regular variant sends SPACE.
+        BTN variant clicks .pvt-trial.
         """
+
+        response_mode = self._response_mode(ctx)
 
         ctx.logger.info(
             "PVT intentional false start for %s: waiting %dms "
-            "while box is empty.",
+            "while box is empty; response_mode=%s.",
             trial_label,
             self.FALSE_START_DELAY_MS,
+            response_mode,
         )
 
         started = time.perf_counter()
@@ -977,8 +1123,9 @@ return {
 
             if numeric_value:
                 ctx.logger.warning(
-                    "PVT %s: number appeared before intentional false-start "
-                    "press (value=%s); responding normally instead.",
+                    "PVT %s: number appeared before intentional "
+                    "false-start response (value=%s); responding "
+                    "normally instead.",
                     trial_label,
                     numeric_value,
                 )
@@ -998,18 +1145,21 @@ return {
                     delay_ms=300,
                     trial_label=trial_label,
                 )
-                observation["action"] = "fallback_normal_response"
+
+                observation["action"] = (
+                    "fallback_normal_response"
+                )
                 return observation
 
             if not state.get("boxVisible"):
                 raise RuntimeError(
-                    f"PVT stimulus box disappeared before intentional "
+                    "PVT stimulus box disappeared before intentional "
                     f"false start for {trial_label}."
                 )
 
             time.sleep(0.01)
 
-        self._press_space(
+        self._send_trial_response(
             ctx,
             f"{trial_label} intentional false start",
         )
@@ -1024,15 +1174,20 @@ return {
         ) or immediate_feedback
 
         ctx.logger.info(
-            "PVT intentional false start completed for %s: feedback=%r",
+            "PVT intentional false start completed for %s: "
+            "response_mode=%s feedback=%r",
             trial_label,
+            response_mode,
             feedback,
         )
 
         return {
             "trial": trial_label,
             "action": "false_start",
-            "requested_false_start_delay_ms": self.FALSE_START_DELAY_MS,
+            "response_mode": response_mode,
+            "requested_false_start_delay_ms": (
+                self.FALSE_START_DELAY_MS
+            ),
             "feedback": feedback,
         }
 
@@ -1044,10 +1199,9 @@ return {
         trial_label: str,
     ) -> dict:
         """
-        Do not press anything for this visible stimulus.
+        Perform no participant response for this visible stimulus.
 
-        Wait for CNB to clear the counter on its own. This is used after the
-        first five normal responses in first5_then_stop.
+        This behavior is identical for keyboard and click variants.
         """
 
         ctx.logger.info(
@@ -1072,12 +1226,13 @@ return {
 
             if numeric_value:
                 last_value = numeric_value
+
             else:
                 feedback = self._read_feedback(ctx)
 
                 ctx.logger.info(
-                    "PVT no-input trial completed for %s after %.1fms: "
-                    "feedback=%r",
+                    "PVT no-input trial completed for %s after "
+                    "%.1fms: feedback=%r",
                     trial_label,
                     (time.perf_counter() - started) * 1000.0,
                     feedback,
@@ -1089,7 +1244,10 @@ return {
                     "counter_value_at_detection": event.get("value"),
                     "last_counter_value": last_value,
                     "waited_without_input_ms": round(
-                        (time.perf_counter() - started) * 1000.0,
+                        (
+                            time.perf_counter()
+                            - started
+                        ) * 1000.0,
                         2,
                     ),
                     "feedback": feedback,
@@ -1098,21 +1256,14 @@ return {
             time.sleep(0.02)
 
         raise RuntimeError(
-            f"PVT no-input trial {trial_label} did not clear within "
-            f"{self.NO_INPUT_CLEAR_SECONDS:.1f}s."
+            f"PVT no-input trial {trial_label} did not clear "
+            f"within {self.NO_INPUT_CLEAR_SECONDS:.1f}s."
         )
 
     def _run_main_random_stop(
         self,
         ctx,
     ) -> tuple[list[dict], dict]:
-        """
-        Respond normally for a random number of scored trials, then stop all
-        participant input and observe whether CNB terminates the session.
-
-        The random stop point is chosen once per run and is logged/stored.
-        """
-
         stop_after = random.randint(
             self.MAIN_RANDOM_STOP_MIN_RESPONSES,
             self.MAIN_RANDOM_STOP_MAX_RESPONSES,
@@ -1136,14 +1287,14 @@ return {
 
             if event.get("type") == "task_end":
                 raise RuntimeError(
-                    "PVT main test ended before the random abandonment point "
-                    f"was reached. stop_after={stop_after}; "
-                    f"observed={trial_index}; reason={event.get('reason')!r}"
+                    "PVT main test ended before the random "
+                    "abandonment point was reached. "
+                    f"stop_after={stop_after}; "
+                    f"observed={trial_index}; "
+                    f"reason={event.get('reason')!r}"
                 )
 
             if event.get("type") == "begin_test":
-                # We should already have clicked BEGIN TEST before entering
-                # this method. Do not interpret this as a participant action.
                 raise RuntimeError(
                     "Unexpected BEGIN TEST screen while running "
                     "main_random_stop."
@@ -1163,12 +1314,16 @@ return {
                 delay_ms=300,
                 trial_label=trial_label,
             )
-            observation["action"] = "respond_before_abandonment"
+
+            observation["action"] = (
+                "respond_before_abandonment"
+            )
             observation["strategy"] = "main_random_stop"
             observations.append(observation)
 
         ctx.logger.info(
-            "PVT main-test abandonment point reached after %d responses.",
+            "PVT main-test abandonment point reached after "
+            "%d responses.",
             trial_index,
         )
 
@@ -1178,6 +1333,7 @@ return {
             phase="main_test",
             responses_before_stop=trial_index,
         )
+
         abandonment["random_stop_after_responses"] = stop_after
 
         return observations, abandonment
@@ -1202,8 +1358,6 @@ return {
             next_trial_index = trial_index + 1
             trial_label = f"test_{next_trial_index}"
 
-            # Strategy 2: first five scored opportunities are intentional
-            # false starts, before any numeric counter appears.
             if (
                 strategy == "first5_false_starts"
                 and next_trial_index <= 5
@@ -1235,12 +1389,15 @@ return {
             if event.get("type") == "begin_test":
                 ctx.logger.warning(
                     "PVT BEGIN TEST appeared again during main test; "
-                    "pressing SPACE and continuing."
+                    "advancing via Continue and continuing."
                 )
-                self._press_space(
+
+                self._click_continue(
                     ctx,
-                    "unexpected BEGIN TEST during main test",
+                    label="PVT unexpected BEGIN TEST during main test",
+                    timeout=10,
                 )
+
                 self._wait_for_stimulus_container(
                     ctx,
                     "main test restart",
@@ -1256,7 +1413,6 @@ return {
             trial_index += 1
             trial_label = f"test_{trial_index}"
 
-            # Strategy 6: respond to trials 1-5, then never send another key.
             if (
                 strategy == "first5_then_stop"
                 and trial_index > 5
@@ -1275,10 +1431,12 @@ return {
             )
 
             ctx.logger.info(
-                "PVT strategy=%s for %s: response_delay=%dms",
+                "PVT strategy=%s for %s: "
+                "response_delay=%dms response_mode=%s",
                 strategy,
                 trial_label,
                 delay_ms,
+                self._response_mode(ctx),
             )
 
             observation = self._respond_to_counter_event(
@@ -1287,6 +1445,7 @@ return {
                 delay_ms=delay_ms,
                 trial_label=trial_label,
             )
+
             observation["action"] = "respond"
             observation["strategy"] = strategy
 
@@ -1305,18 +1464,20 @@ return {
 
         try:
             strategy = self._validate_strategy(strategy)
+            test_code = self._active_test_code(ctx)
+            variant = self._variant(ctx)
 
             ctx.logger.info(
-                "PVT 6.00 starting test=%s strategy=%s",
-                self.exact_code,
+                "PVT 6.00 starting test=%s strategy=%s "
+                "response_mode=%s instruction_mode=%s",
+                test_code,
                 strategy,
+                variant["response_mode"],
+                variant["instruction_mode"],
             )
 
             self._enter_practice(ctx)
 
-            # Scenario 7:
-            # Participant responds to seven practice trials and then abandons
-            # the session completely. We never advance BEGIN TEST ourselves.
             if strategy == "practice_stop_after_7":
                 (
                     practice_observations,
@@ -1324,6 +1485,9 @@ return {
                 ) = self._run_practice_stop_after_7(ctx)
 
                 ctx.pvt_observations = {
+                    "test_code": test_code,
+                    "response_mode": variant["response_mode"],
+                    "instruction_mode": variant["instruction_mode"],
                     "strategy": strategy,
                     "practice_count": len(practice_observations),
                     "test_count": 0,
@@ -1342,19 +1506,16 @@ return {
                     errors=[],
                 )
 
-            # All other scenarios complete practice normally.
             practice_observations = self._run_practice(ctx)
 
             ctx.logger.info(
-                "PVT 6.00 completed dynamic practice block: %d trials.",
+                "PVT 6.00 completed dynamic practice block: "
+                "%d trials.",
                 len(practice_observations),
             )
 
             self._enter_main_test(ctx)
 
-            # Scenario 8:
-            # Participant completes practice and begins the scored test, then
-            # abandons after a randomly selected number of normal responses.
             if strategy == "main_random_stop":
                 (
                     test_observations,
@@ -1362,6 +1523,9 @@ return {
                 ) = self._run_main_random_stop(ctx)
 
                 ctx.pvt_observations = {
+                    "test_code": test_code,
+                    "response_mode": variant["response_mode"],
+                    "instruction_mode": variant["instruction_mode"],
                     "strategy": strategy,
                     "practice_count": len(practice_observations),
                     "test_count": len(test_observations),
@@ -1380,18 +1544,21 @@ return {
                     errors=[],
                 )
 
-            # Existing six scenarios are unchanged.
             test_observations = self._run_main_test(
                 ctx,
                 strategy=strategy,
             )
 
             ctx.logger.info(
-                "PVT 6.00 completed dynamic scored block: %d trials.",
+                "PVT 6.00 completed dynamic scored block: "
+                "%d trials.",
                 len(test_observations),
             )
 
             ctx.pvt_observations = {
+                "test_code": test_code,
+                "response_mode": variant["response_mode"],
+                "instruction_mode": variant["instruction_mode"],
                 "strategy": strategy,
                 "practice_count": len(practice_observations),
                 "test_count": len(test_observations),
@@ -1416,4 +1583,3 @@ return {
             status="PASS",
             errors=[],
         )
-
