@@ -8,43 +8,13 @@ import re
 import time
 from datetime import datetime
 from pathlib import Path
-from scraping.spllt_scraper import scrape_spllt_records
 
-try:
-    from core.driver_factory import build_driver
-except ImportError:
-    from core.driver_factory import build_chrome_driver
-
-    def build_driver(browser="chrome", headless=None):
-        browser = (browser or "chrome").strip().lower()
-        if browser != "chrome":
-            raise RuntimeError(
-                "Firefox/Edge require core.driver_factory.build_driver(). "
-                "Update core/driver_factory.py before choosing this browser."
-            )
-        return build_chrome_driver(headless=headless)
-
-from core.logging_setup import setup_logging
-from core.waits import Waits
-from core.artifacts import ArtifactManager
-from core.session_context import SessionContext
-from core.subid_registry import SubidRegistry
-from tests_catalog.registry import TEST_REGISTRY
-from workflows.launch_battery import launch_battery
-from workflows.run_battery import run_battery
 from core.environment import (
     choose_environment,
     activate_environment,
     apply_environment_to_scrapers,
     apply_environment_to_context,
 )
-from workflows.scrape_completed_tests import scrape_completed_tests
-
-try:
-    from scraping.base_scraper import get_datasetid_for_subid
-except Exception:
-    get_datasetid_for_subid = None
-
 
 BROWSER_CHOICES = {
     "1": "chrome",
@@ -118,13 +88,13 @@ def generic_group_name(exact_code: str) -> str:
     return code.split("-", 1)[0]
 
 
-def available_test_groups() -> list[str]:
-    groups = {generic_group_name(code) for code in TEST_REGISTRY.keys()}
+def available_test_groups(test_registry) -> list[str]:
+    groups = {generic_group_name(code) for code in test_registry.keys()}
     return sorted(group for group in groups if group)
 
 
-def prompt_run_scope():
-    groups = available_test_groups()
+def prompt_run_scope(test_registry):
+    groups = available_test_groups(test_registry)
 
     print()
     print("Run mode:")
@@ -482,6 +452,7 @@ def rename_output_dir(current_output_dir: Path, final_output_dir: Path) -> Path:
 
 
 def build_session_context(
+    session_context_cls,
     driver,
     wait,
     logger,
@@ -503,16 +474,20 @@ def build_session_context(
     }
 
     try:
-        return SessionContext(
+        return session_context_cls(
             **base_kwargs,
             browser=browser,
             headless=headless,
         )
     except TypeError:
-        return SessionContext(**base_kwargs)
+        return session_context_cls(**base_kwargs)
 
 
-def lookup_datasetid(subid: str, logger) -> tuple[str | None, str | None]:
+def lookup_datasetid(
+    subid: str,
+    logger,
+    get_datasetid_for_subid,
+) -> tuple[str | None, str | None]:
     if get_datasetid_for_subid is None:
         return None, "get_datasetid_for_subid is not available from scraping.base_scraper."
 
@@ -533,14 +508,52 @@ def main():
     print("Browser-selectable, selected-test capable, headless-capable")
     print("Score scraping disabled by default; status summary enabled")
     print("=" * 70)
+
+    # Select/load PROD or DEV before importing any module that might
+    # read credentials or environment-specific settings.
     environment_name = choose_environment()
     environment_config = activate_environment(environment_name)
+
+    # Environment-sensitive imports happen only after .env/.env.dev
+    # has been loaded.
+    try:
+        from core.driver_factory import build_driver
+    except ImportError:
+        from core.driver_factory import build_chrome_driver
+
+        def build_driver(browser="chrome", headless=None):
+            browser = (browser or "chrome").strip().lower()
+            if browser != "chrome":
+                raise RuntimeError(
+                    "Firefox/Edge require core.driver_factory.build_driver(). "
+                    "Update core/driver_factory.py before choosing this browser."
+                )
+            return build_chrome_driver(headless=headless)
+
+    from core.logging_setup import setup_logging
+    from core.waits import Waits
+    from core.artifacts import ArtifactManager
+    from core.session_context import SessionContext
+    from core.subid_registry import SubidRegistry
+    from tests_catalog.registry import TEST_REGISTRY
+    from workflows.launch_battery import launch_battery
+    from workflows.run_battery import run_battery
+    from workflows.scrape_completed_tests import scrape_completed_tests
+    from scraping.spllt_scraper import scrape_spllt_records
+
+    try:
+        from scraping.base_scraper import get_datasetid_for_subid
+    except Exception:
+        get_datasetid_for_subid = None
+
+    # Scrapers currently keep URL globals, so update them only after
+    # the selected environment has been loaded.
     apply_environment_to_scrapers(environment_config)
 
     browser = choose_browser()
     subid = prompt_required("Enter Subject ID / subid: ")
     battery_code = prompt_required("Enter Battery Code: ")
-    run_scope, selected_test_tokens = prompt_run_scope()
+    run_scope, selected_test_tokens = prompt_run_scope(TEST_REGISTRY)
 
     headless = resolve_headless()
     run_date = datetime.now().strftime("%Y%m%d")
@@ -600,6 +613,7 @@ def main():
         registry.register_battery(subid, battery_code)
 
         ctx = build_session_context(
+            session_context_cls=SessionContext,
             driver=driver,
             wait=wait,
             logger=logger,
@@ -683,7 +697,11 @@ def main():
         raise RuntimeError("Session context was not created; cannot finalize results.")
 
     logger.info("Looking up dataset ID for output folder name...")
-    datasetid, dataset_lookup_error = lookup_datasetid(subid, logger)
+    datasetid, dataset_lookup_error = lookup_datasetid(
+        subid,
+        logger,
+        get_datasetid_for_subid,
+    )
 
     final_dir = final_output_dir_for(output_root, datasetid, run_date, subid)
     output_dir = rename_output_dir(output_dir, final_dir)
