@@ -104,5 +104,5 @@ DEFAULT_STRATEGIES = {
     "k-svolt-3.01-ff": "random",
     "spllt-a-1.00-ff": "suite",
     "pvt-b-5.00-ff": "first5_false_starts",
-    "pvt-b-6.00-ff": "under_350",
+    "pvt-b-6.00-ff": "first5_false_starts",
 }
