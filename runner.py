@@ -514,6 +514,117 @@ def lookup_datasetid(
         return None, str(exc)
 
 
+def lookup_latest_datasetid(
+    subid: str,
+    logger,
+    get_datasetids_for_subid,
+    *,
+    previous_latest: str | None = None,
+    timeout_seconds: float = 90.0,
+    poll_seconds: float = 3.0,
+) -> tuple[str | None, str | None]:
+    """
+    Resolve the newest dataset ID from the session-list page.
+
+    This is safer for "all 3 browsers" mode than opening the first View
+    button, because the same subid intentionally has multiple administrations.
+
+    For browser 2/3, previous_latest is the dataset ID assigned to the
+    preceding browser. We wait until a newer/different maximum ID appears,
+    which also handles short results-page propagation delays.
+    """
+    if get_datasetids_for_subid is None:
+        return (
+            None,
+            "get_datasetids_for_subid is not available from "
+            "scraping.base_scraper.",
+        )
+
+    deadline = time.time() + float(timeout_seconds)
+    last_error = None
+    last_ids = []
+
+    previous_value = str(previous_latest).strip() if previous_latest else None
+
+    while time.time() < deadline:
+        try:
+            ids = get_datasetids_for_subid(subid=subid) or []
+            ids = [
+                str(value).strip()
+                for value in ids
+                if str(value).strip()
+            ]
+            last_ids = ids
+
+            numeric_ids = [
+                value
+                for value in ids
+                if value.isdigit()
+            ]
+
+            if numeric_ids:
+                latest = max(
+                    numeric_ids,
+                    key=lambda value: int(value),
+                )
+
+                if (
+                    previous_value is None
+                    or latest != previous_value
+                ):
+                    logger.info(
+                        "Newest dataset ID found from session list: %s "
+                        "(all IDs for subid=%s: %s)",
+                        latest,
+                        subid,
+                        ids,
+                    )
+                    return latest, None
+
+                logger.info(
+                    "Results page still shows previous dataset ID %s "
+                    "as newest; waiting for the next browser session "
+                    "to appear...",
+                    previous_value,
+                )
+
+            elif ids:
+                # Non-numeric fallback. Dataset IDs are normally numeric,
+                # but preserve graceful behavior if that ever changes.
+                latest = ids[-1]
+
+                if (
+                    previous_value is None
+                    or latest != previous_value
+                ):
+                    logger.info(
+                        "Newest non-numeric dataset ID found: %s",
+                        latest,
+                    )
+                    return latest, None
+
+        except Exception as exc:
+            last_error = exc
+            logger.info(
+                "Dataset session-list lookup not ready yet: %s",
+                exc,
+            )
+
+        time.sleep(float(poll_seconds))
+
+    message = (
+        f"Could not resolve a new dataset ID for subid={subid!r} "
+        f"within {timeout_seconds:.0f} seconds. "
+        f"Previous latest={previous_value!r}; "
+        f"last IDs seen={last_ids!r}."
+    )
+
+    if last_error is not None:
+        message += f" Last lookup error: {last_error}"
+
+    return None, message
+
+
 def main():
     print("=" * 70)
     print("PENN CNB BATTERY RUNNER")
@@ -554,9 +665,13 @@ def main():
     from scraping.spllt_scraper import scrape_spllt_records
 
     try:
-        from scraping.base_scraper import get_datasetid_for_subid
+        from scraping.base_scraper import (
+            get_datasetid_for_subid,
+            get_datasetids_for_subid,
+        )
     except Exception:
         get_datasetid_for_subid = None
+        get_datasetids_for_subid = None
 
     # Scrapers currently keep URL globals, so update them only after
     # the selected environment has been loaded.
@@ -602,7 +717,13 @@ def main():
 
     output_root = Path("output")
 
+    # In option-4 mode the same subid deliberately creates several CNB
+    # administrations. Keep track of the newest dataset assigned to the
+    # previous browser so the next browser cannot accidentally reuse it.
+    previous_latest_datasetid = None
+
     def run_single_browser(browser: str) -> dict:
+        nonlocal previous_latest_datasetid
         """
         Execute one complete battery run in one browser.
 
@@ -785,14 +906,37 @@ def main():
             }
 
         logger.info(
-            "Looking up dataset ID for output folder name..."
+            "Looking up newest dataset ID for this browser run..."
         )
 
-        datasetid, dataset_lookup_error = lookup_datasetid(
+        datasetid, dataset_lookup_error = lookup_latest_datasetid(
             subid,
             logger,
-            get_datasetid_for_subid,
+            get_datasetids_for_subid,
+            previous_latest=previous_latest_datasetid,
+            timeout_seconds=90,
+            poll_seconds=3,
         )
+
+        # Backward-compatible fallback for repositories whose base_scraper
+        # does not yet expose get_datasetids_for_subid().
+        if (
+            datasetid is None
+            and get_datasetids_for_subid is None
+        ):
+            logger.warning(
+                "List-based dataset lookup is unavailable; "
+                "falling back to the legacy single-dataset lookup."
+            )
+
+            datasetid, dataset_lookup_error = lookup_datasetid(
+                subid,
+                logger,
+                get_datasetid_for_subid,
+            )
+
+        if datasetid is not None:
+            previous_latest_datasetid = str(datasetid)
 
         final_dir = final_output_dir_for(
             output_root,
