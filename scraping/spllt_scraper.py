@@ -196,113 +196,350 @@ def get_datasetids_for_subid(subid: str) -> list[str]:
 # ---------------------------------------------------------------------
 
 
-def _post_results_form(driver, datasetid: str) -> None:
+def _datasetid_from_form(form) -> str | None:
     """
-    Submit the same fields as the CNB "List Scores" form.
-
-    The live score-page HTML shows that the form submits:
-        op=display_scores
-        datasetid=<exact dataset>
-        test=spllt-a-1.00-ff
-        ListScores=List Scores
-
-    Posting only op + datasetid is not equivalent to clicking the real
-    List Scores button, because the clicked submit button contributes its
-    own name/value to the POST body.
+    Return the dataset ID associated with one session-list form.
     """
-    driver.execute_script(
-        """
-        const action = arguments[0];
-        const datasetid = arguments[1];
-        const testCode = arguments[2];
-
-        const form = document.createElement('form');
-        form.method = 'POST';
-        form.action = action;
-
-        function addField(name, value) {
-            const input = document.createElement('input');
-            input.type = 'hidden';
-            input.name = name;
-            input.value = value;
-            form.appendChild(input);
-        }
-
-        addField('op', 'display_scores');
-        addField('datasetid', datasetid);
-        addField('test', testCode);
-        addField('ListScores', 'List Scores');
-
-        document.body.appendChild(form);
-        form.submit();
-        """,
-        BASE_RESULTS_URL,
-        str(datasetid),
-        SPLLT_TEST_CODE,
+    selectors = (
+        "input[name='datasetid']",
+        "input[name='dataset_id']",
+        "input[id='datasetid']",
+        "input[id='dataset_id']",
     )
 
-    # Allow the POST navigation to begin, then wait for the destination
-    # document to finish loading.
-    time.sleep(0.4)
-    WebDriverWait(driver, 30).until(_document_ready)
+    for selector in selectors:
+        try:
+            elements = form.find_elements(By.CSS_SELECTOR, selector)
+        except Exception:
+            elements = []
+
+        for element in elements:
+            try:
+                value = (element.get_attribute("value") or "").strip()
+            except Exception:
+                value = ""
+
+            if re.fullmatch(r"\d+", value):
+                return value
+
+    try:
+        html = form.get_attribute("outerHTML") or ""
+    except Exception:
+        html = ""
+
+    for pattern in (
+        r'name=["\']datasetid["\'][^>]*value=["\'](\d+)["\']',
+        r'value=["\'](\d+)["\'][^>]*name=["\']datasetid["\']',
+        r'name=["\']dataset_id["\'][^>]*value=["\'](\d+)["\']',
+        r'value=["\'](\d+)["\'][^>]*name=["\']dataset_id["\']',
+        r'datasetid(?:=|%3D)(\d+)',
+        r'dataset_id(?:=|%3D)(\d+)',
+    ):
+        match = re.search(pattern, html, flags=re.IGNORECASE)
+        if match:
+            return match.group(1)
+
+    return None
 
 
-def _validate_datasetid(driver, datasetid: str) -> None:
+def _find_view_button_for_datasetid(driver, datasetid: str):
+    """
+    Find the exact View button whose ancestor form belongs to datasetid.
+    """
+    expected = str(datasetid).strip()
+    seen: list[str] = []
+
+    buttons = driver.find_elements(
+        By.XPATH,
+        "//input[@name='ViewSession' and @value='View']",
+    )
+
+    for button in buttons:
+        try:
+            form = button.find_element(By.XPATH, "./ancestor::form[1]")
+        except Exception:
+            continue
+
+        observed = _datasetid_from_form(form)
+
+        if observed:
+            seen.append(observed)
+
+        if observed == expected:
+            return button
+
+    raise RuntimeError(
+        f"Could not find ViewSession button for datasetid={expected}. "
+        f"Dataset IDs attached to visible View forms: {seen}"
+    )
+
+
+def _validate_datasetid(driver, datasetid: str, timeout: float = 20.0) -> None:
+    """
+    Confirm that the currently open CNB page belongs to the requested dataset.
+    """
     expected = str(datasetid).strip()
 
     def matching_dataset(d):
-        # Primary check: hidden datasetid field on the score page.
         for element in d.find_elements(
             By.CSS_SELECTOR,
-            "input[name='datasetid']",
+            "input[name='datasetid'], input[name='dataset_id']",
         ):
-            observed = (element.get_attribute("value") or "").strip()
+            try:
+                observed = (element.get_attribute("value") or "").strip()
+            except Exception:
+                continue
+
             if observed == expected:
                 return True
 
-        # Fallback: the Test Information table visibly prints Dataset ID.
-        body_text = d.find_element(By.TAG_NAME, "body").text or ""
-        return expected in body_text and "Dataset ID:" in body_text
+        try:
+            body_text = d.find_element(By.TAG_NAME, "body").text or ""
+        except Exception:
+            body_text = ""
 
-    WebDriverWait(driver, 30).until(matching_dataset)
+        return (
+            expected in body_text
+            and "Dataset ID:" in body_text
+        )
+
+    WebDriverWait(driver, timeout).until(matching_dataset)
 
 
-def _score_page_loaded(driver) -> bool:
+def _target_scores_present(driver) -> bool:
     """
-    Confirm that the SPLLT score section, not merely generic row markup,
-    has loaded.
-
-    The page has many tr.row1/tr.row2 elements before the score table, so
-    generic row-count checks are not sufficient.
+    Return True only when actual SPLLT target score rows are present.
     """
-    body_text = driver.find_element(By.TAG_NAME, "body").text or ""
+    target_names = {name.upper() for name in SPLLT_SCORE_COLUMNS}
 
-    return (
-        "Test Scores:" in body_text
-        and SPLLT_TEST_CODE in body_text
-    )
+    for row in driver.find_elements(By.CSS_SELECTOR, "tr.row1, tr.row2"):
+        cells = row.find_elements(By.TAG_NAME, "td")
+
+        if len(cells) < 2:
+            continue
+
+        score_name = _normalize_score_name(cells[0].text).upper()
+
+        if score_name in target_names:
+            return True
+
+    return False
 
 
-def open_scores_for_datasetid(driver, datasetid: str) -> None:
+def _close_extra_windows(driver, keep_handle: str) -> None:
     """
-    Open the score page for one exact SPLLT dataset.
+    Close result popups left by prior session views and return to keep_handle.
+    """
+    for handle in list(driver.window_handles):
+        if handle == keep_handle:
+            continue
 
-    This submits the canonical List Scores POST in one step and avoids the
-    previous two-stage POST-then-click sequence that was timing out.
+        try:
+            driver.switch_to.window(handle)
+            driver.close()
+        except Exception:
+            pass
+
+    driver.switch_to.window(keep_handle)
+
+
+def open_scores_for_datasetid(
+    driver,
+    subid: str,
+    datasetid: str,
+    logger=None,
+) -> None:
+    """
+    Open one exact SPLLT dataset by following CNB's normal UI:
+
+        Display Test Sessions
+        -> search subid
+        -> List Session(s)
+        -> exact dataset's View button
+        -> Display Test Scores
+        -> select SPLLT
+        -> List Scores
+
+    This avoids direct hand-built POSTs to results.pl.
     """
     datasetid = str(datasetid).strip()
+    subid = str(subid or "").strip()
 
     if not datasetid:
         raise ValueError("datasetid is required")
 
-    _post_results_form(
-        driver,
-        datasetid=datasetid,
+    if not subid:
+        raise ValueError("subid is required")
+
+    base_handle = driver.window_handles[0]
+    _close_extra_windows(driver, base_handle)
+
+    if logger:
+        logger.info(
+            "SPLLT scraper opening session list for subid=%s datasetid=%s",
+            subid,
+            datasetid,
+        )
+
+    driver.get(RESULTS_URL)
+    WebDriverWait(driver, 20).until(_document_ready)
+
+    try:
+        field = WebDriverWait(driver, 5).until(
+            EC.presence_of_element_located((By.NAME, "multi_subid"))
+        )
+    except Exception:
+        do_login(driver, LOGIN_URL, RESULTS_URL)
+        time.sleep(1)
+        driver.get(RESULTS_URL)
+
+        field = WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.NAME, "multi_subid"))
+        )
+
+    field.clear()
+    field.send_keys(subid)
+
+    try:
+        Select(
+            driver.find_element(By.NAME, "multi_siteid")
+        ).select_by_value("TEST")
+    except Exception:
+        pass
+
+    list_sessions_btn = WebDriverWait(driver, 20).until(
+        EC.element_to_be_clickable(
+            (By.XPATH, "//input[@value='   List Session(s)   ']")
+        )
+    )
+    _safe_click(driver, list_sessions_btn)
+
+    WebDriverWait(driver, 20).until(
+        lambda d: len(
+            d.find_elements(
+                By.XPATH,
+                "//input[@name='ViewSession' and @value='View']",
+            )
+        ) > 0
     )
 
-    _validate_datasetid(driver, datasetid)
+    view_button = _find_view_button_for_datasetid(
+        driver,
+        datasetid,
+    )
 
-    WebDriverWait(driver, 30).until(_score_page_loaded)
+    if logger:
+        logger.info(
+            "SPLLT scraper found exact ViewSession button for datasetid=%s",
+            datasetid,
+        )
+
+    old_handles = set(driver.window_handles)
+    old_url = driver.current_url
+
+    _safe_click(driver, view_button)
+
+    try:
+        WebDriverWait(driver, 12).until(
+            lambda d: (
+                len(d.window_handles) > len(old_handles)
+                or d.current_url != old_url
+                or len(
+                    d.find_elements(
+                        By.XPATH,
+                        "//a[contains(@onclick, 'display_scores')]",
+                    )
+                ) > 0
+            )
+        )
+    except Exception:
+        pass
+
+    new_handles = set(driver.window_handles)
+
+    if len(new_handles) > len(old_handles):
+        new_handle = list(new_handles - old_handles)[0]
+        driver.switch_to.window(new_handle)
+
+        if logger:
+            logger.info(
+                "SPLLT scraper switched to ViewSession popup for datasetid=%s",
+                datasetid,
+            )
+
+    WebDriverWait(driver, 20).until(_document_ready)
+    _validate_datasetid(driver, datasetid, timeout=20)
+
+    if logger:
+        logger.info(
+            "SPLLT scraper validated session datasetid=%s",
+            datasetid,
+        )
+
+    if _target_scores_present(driver):
+        if logger:
+            logger.info(
+                "SPLLT target scores already visible for datasetid=%s",
+                datasetid,
+            )
+        return
+
+    score_links = driver.find_elements(
+        By.XPATH,
+        "//a[contains(@onclick, 'display_scores')]",
+    )
+
+    score_link = next(
+        (
+            element
+            for element in score_links
+            if element.is_displayed()
+        ),
+        None,
+    )
+
+    if score_link is None:
+        raise RuntimeError(
+            f"Display Test Scores link not found for datasetid={datasetid}. "
+            f"Current URL: {driver.current_url}"
+        )
+
+    _safe_click(driver, score_link)
+
+    WebDriverWait(driver, 20).until(_document_ready)
+    _validate_datasetid(driver, datasetid, timeout=20)
+
+    if logger:
+        logger.info(
+            "SPLLT scraper opened Display Test Scores for datasetid=%s",
+            datasetid,
+        )
+
+    if not _target_scores_present(driver):
+        try:
+            test_select = Select(driver.find_element(By.NAME, "test"))
+            test_select.select_by_value(SPLLT_TEST_CODE)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Could not select {SPLLT_TEST_CODE} on score page for "
+                f"datasetid={datasetid}: {exc}"
+            ) from exc
+
+        list_scores_btn = WebDriverWait(driver, 20).until(
+            EC.element_to_be_clickable((By.NAME, "ListScores"))
+        )
+        _safe_click(driver, list_scores_btn)
+
+        WebDriverWait(driver, 20).until(_document_ready)
+        _validate_datasetid(driver, datasetid, timeout=20)
+
+    WebDriverWait(driver, 20).until(_target_scores_present)
+
+    if logger:
+        logger.info(
+            "SPLLT target score rows loaded for datasetid=%s",
+            datasetid,
+        )
 
 
 def collect_spllt_scores(driver) -> dict[str, str]:
@@ -473,7 +710,12 @@ def scrape_spllt_records(ctx, completed_tests: list[dict]) -> list[dict]:
             )
 
             try:
-                open_scores_for_datasetid(driver, datasetid)
+                open_scores_for_datasetid(
+                    driver,
+                    subid=ctx.subid,
+                    datasetid=datasetid,
+                    logger=ctx.logger,
+                )
                 scores = collect_spllt_scores(driver)
 
                 missing_scores = [
