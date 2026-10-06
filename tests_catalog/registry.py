@@ -61,6 +61,7 @@ TEST_REGISTRY = {
     "spllt-d-1.00-ff": SPLLTPlugin,
     "pvt-b-5.00-ff": PVTPlugin,
     "pvt-b-6.00-ff": PVT6Plugin,
+    "pvt-b-btn-6.00-ff": PVT6Plugin,
 
 }
 
@@ -111,4 +112,5 @@ DEFAULT_STRATEGIES = {
     "spllt-d-1.00-ff": "suite",
     "pvt-b-5.00-ff": "first5_false_starts",
     "pvt-b-6.00-ff": "first5_false_starts",
+    "pvt-b-btn-6.00-ff": "under_350",
 }
