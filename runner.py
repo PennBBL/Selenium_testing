@@ -733,10 +733,18 @@ def main():
     logger.info("Run metadata written to %s", outputs["metadata_path"])
     logger.info("Summary CSV written to %s", outputs["summary_path"])
 
+    spllt_test_codes = {
+        "spllt-a-1.00-ff",
+        "spllt-b-1.00-ff",
+        "spllt-c-1.00-ff",
+        "spllt-d-1.00-ff",
+    }
+
     spllt_records = [
         record
         for record in completed_tests
-        if record.get("test_name") == "spllt-a-1.00-ff"
+        if str(record.get("test_name") or "").strip().lower()
+        in spllt_test_codes
     ]
 
     if spllt_records:
