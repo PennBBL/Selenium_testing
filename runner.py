@@ -20,12 +20,18 @@ BROWSER_CHOICES = {
     "1": "chrome",
     "2": "firefox",
     "3": "edge",
+    "4": "all",
     "chrome": "chrome",
     "firefox": "firefox",
     "ff": "firefox",
     "edge": "edge",
     "msedge": "edge",
+    "all": "all",
+    "all3": "all",
+    "all browsers": "all",
 }
+
+ALL_BROWSERS = ["chrome", "firefox", "edge"]
 
 
 SUMMARY_CSV_NAME = "completed_tests_summary.csv"
@@ -46,9 +52,12 @@ def choose_browser() -> str:
     print("  1. Chrome")
     print("  2. Firefox")
     print("  3. Edge")
+    print("  4. All 3 browsers (Chrome -> Firefox -> Edge)")
 
     while True:
-        value = input("Browser [1/chrome, 2/firefox, 3/edge]: ").strip().lower()
+        value = input(
+            "Browser [1/chrome, 2/firefox, 3/edge, 4/all]: "
+        ).strip().lower()
 
         if not value:
             return "chrome"
@@ -57,7 +66,10 @@ def choose_browser() -> str:
         if browser:
             return browser
 
-        print("Invalid browser. Choose chrome, firefox, or edge.")
+        print(
+            "Invalid browser. Choose chrome, firefox, edge, "
+            "or all 3 browsers."
+        )
 
 
 def generic_group_name(exact_code: str) -> str:
@@ -550,7 +562,13 @@ def main():
     # the selected environment has been loaded.
     apply_environment_to_scrapers(environment_config)
 
-    browser = choose_browser()
+    browser_choice = choose_browser()
+    browsers = (
+        list(ALL_BROWSERS)
+        if browser_choice == "all"
+        else [browser_choice]
+    )
+
     subid = prompt_required("Enter Subject ID / subid: ")
     battery_code = prompt_required("Enter Battery Code: ")
     run_scope, selected_test_tokens = prompt_run_scope(TEST_REGISTRY)
@@ -562,242 +580,433 @@ def main():
     print(f"Environment: {environment_config.name.upper()}")
     print(f"CNB host: {environment_config.base_host}")
     print(f"Environment file: {environment_config.env_file}")
-    print(f"Browser: {browser}")
+
+    if len(browsers) == 1:
+        print(f"Browser: {browsers[0]}")
+    else:
+        print(
+            "Browsers: "
+            + " -> ".join(browser.capitalize() for browser in browsers)
+        )
+
     print(f"Headless: {headless}")
     print(f"Subid: {subid}")
     print(f"Battery Code: {battery_code}")
     print(f"Run scope: {run_scope}")
+
     if run_scope == "selected":
         print(f"Selected test(s): {', '.join(selected_test_tokens)}")
+
     print(f"Score scraping enabled: {score_scraping_enabled()}")
     print()
 
-    temp_run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_root = Path("output")
-    output_dir = output_root / f"_tmp_{temp_run_id}_{sanitize_folder_part(subid)}"
-    output_dir.mkdir(parents=True, exist_ok=True)
 
-    logger = setup_logging(output_dir)
-    logger.info("Starting PENN CNB Battery Runner")
-    logger.info("Environment: %s", environment_config.name.upper())
-    logger.info("CNB host: %s", environment_config.base_host)
-    logger.info("Environment file: %s", environment_config.env_file)
-    logger.info("Browser: %s", browser)
-    logger.info("Headless: %s", headless)
-    logger.info("Subid: %s", subid)
-    logger.info("Battery code: %s", battery_code)
-    logger.info("Run scope: %s", run_scope)
-    logger.info("Selected test tokens: %s", selected_test_tokens)
-    logger.info("Temporary output directory: %s", output_dir)
-    logger.info("Score scraping enabled: %s", score_scraping_enabled())
+    def run_single_browser(browser: str) -> dict:
+        """
+        Execute one complete battery run in one browser.
 
-    driver = None
-    artifacts = None
-    ctx = None
-    completed_tests = []
+        Option 4 calls this three times sequentially, using the same subid,
+        battery code, environment, and selected-test scope. Each browser gets
+        its own CNB administration(s), output directory, log, metadata, and
+        scrape results.
+        """
+        print()
+        print("=" * 70)
+        print(f"STARTING BROWSER RUN: {browser.upper()}")
+        print("=" * 70)
 
-    runtime_env = {
-        "browser_name": "",
-        "browser_version": "",
-        "os_name": platform.system() or "unknown",
-        "os_version": platform.release() or "unknown",
-    }
-
-    try:
-        driver = build_driver(browser=browser, headless=headless)
-        runtime_env = get_runtime_environment(driver)
-        wait = Waits(driver)
-        artifacts = ArtifactManager(driver, output_dir)
-
-        registry = SubidRegistry(output_dir / "battery_state.json")
-        registry.register_battery(subid, battery_code)
-
-        ctx = build_session_context(
-            session_context_cls=SessionContext,
-            driver=driver,
-            wait=wait,
-            logger=logger,
-            artifacts=artifacts,
-            subid=subid,
-            battery_code=battery_code,
-            output_dir=output_dir,
-            browser=browser,
-            headless=headless,
+        temp_run_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        output_dir = (
+            output_root
+            / (
+                f"_tmp_{temp_run_id}_"
+                f"{sanitize_folder_part(subid)}_"
+                f"{sanitize_folder_part(browser)}"
+            )
         )
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-        apply_environment_to_context(
-            ctx,
-            environment_config,
-        )
+        logger = setup_logging(output_dir)
+        logger.info("Starting PENN CNB Battery Runner")
+        logger.info("Environment: %s", environment_config.name.upper())
+        logger.info("CNB host: %s", environment_config.base_host)
+        logger.info("Environment file: %s", environment_config.env_file)
+        logger.info("Browser: %s", browser)
+        logger.info("Headless: %s", headless)
+        logger.info("Subid: %s", subid)
+        logger.info("Battery code: %s", battery_code)
+        logger.info("Run scope: %s", run_scope)
+        logger.info("Selected test tokens: %s", selected_test_tokens)
+        logger.info("Temporary output directory: %s", output_dir)
+        logger.info("Score scraping enabled: %s", score_scraping_enabled())
 
-        ctx.registry = registry
-        ctx.run_scope = run_scope
-        ctx.selected_test_tokens = selected_test_tokens
+        driver = None
+        artifacts = None
+        ctx = None
+        completed_tests = []
 
-        launch_battery(ctx)
-        completed_tests = run_battery(ctx)
+        runtime_env = {
+            "browser_name": "",
+            "browser_version": "",
+            "os_name": platform.system() or "unknown",
+            "os_version": platform.release() or "unknown",
+        }
 
-        spllt_scenario_records = getattr(
-            ctx,
-            "spllt_scenario_records",
-            None,
-        )
-
-        if spllt_scenario_records:
-            logger.info(
-                "SPLLT produced %d scenario-level completed-test records.",
-                len(spllt_scenario_records),
+        try:
+            driver = build_driver(
+                browser=browser,
+                headless=headless,
             )
 
-            completed_tests = spllt_scenario_records
+            runtime_env = get_runtime_environment(driver)
 
-        # Preliminary files, in case dataset lookup or rename fails.
-        write_run_outputs(
+            wait = Waits(driver)
+            artifacts = ArtifactManager(driver, output_dir)
+
+            registry = SubidRegistry(
+                output_dir / "battery_state.json"
+            )
+            registry.register_battery(
+                subid,
+                battery_code,
+            )
+
+            ctx = build_session_context(
+                session_context_cls=SessionContext,
+                driver=driver,
+                wait=wait,
+                logger=logger,
+                artifacts=artifacts,
+                subid=subid,
+                battery_code=battery_code,
+                output_dir=output_dir,
+                browser=browser,
+                headless=headless,
+            )
+
+            apply_environment_to_context(
+                ctx,
+                environment_config,
+            )
+
+            ctx.registry = registry
+            ctx.run_scope = run_scope
+            ctx.selected_test_tokens = selected_test_tokens
+
+            launch_battery(ctx)
+            completed_tests = run_battery(ctx)
+
+            spllt_scenario_records = getattr(
+                ctx,
+                "spllt_scenario_records",
+                None,
+            )
+
+            if spllt_scenario_records:
+                logger.info(
+                    "SPLLT produced %d scenario-level "
+                    "completed-test records.",
+                    len(spllt_scenario_records),
+                )
+                completed_tests = spllt_scenario_records
+
+            # Preliminary files, in case dataset lookup or rename fails.
+            write_run_outputs(
+                output_dir,
+                completed_tests,
+                run_date=run_date,
+                datasetid=None,
+                subid=subid,
+                battery_code=battery_code,
+                environment=environment_config.name,
+                cnb_host=environment_config.base_host,
+                browser=browser,
+                headless=headless,
+                run_scope=run_scope,
+                selected_test_tokens=selected_test_tokens,
+            )
+
+            logger.info(
+                "Battery completed. Waiting 5 seconds before "
+                "closing test browser..."
+            )
+            time.sleep(5)
+
+        except Exception as exc:
+            logger.exception(
+                "%s battery run failed: %s",
+                browser,
+                exc,
+            )
+
+            if artifacts is not None:
+                try:
+                    artifacts.capture_failure(
+                        "battery_runner_failure",
+                        str(exc),
+                        {
+                            "error": str(exc),
+                            "browser": browser,
+                        },
+                    )
+                except Exception:
+                    logger.exception(
+                        "Could not capture battery runner "
+                        "failure artifact"
+                    )
+
+            # Keep the failed browser's temporary output/log folder so it can
+            # be inspected, then let the caller decide whether to continue.
+            return {
+                "browser": browser,
+                "status": "FAIL",
+                "error": str(exc),
+                "output_dir": str(output_dir),
+            }
+
+        finally:
+            if driver is not None:
+                try:
+                    driver.quit()
+                    logger.info("Test browser closed.")
+                except Exception:
+                    pass
+
+        if ctx is None:
+            return {
+                "browser": browser,
+                "status": "FAIL",
+                "error": (
+                    "Session context was not created; "
+                    "cannot finalize results."
+                ),
+                "output_dir": str(output_dir),
+            }
+
+        logger.info(
+            "Looking up dataset ID for output folder name..."
+        )
+
+        datasetid, dataset_lookup_error = lookup_datasetid(
+            subid,
+            logger,
+            get_datasetid_for_subid,
+        )
+
+        final_dir = final_output_dir_for(
+            output_root,
+            datasetid,
+            run_date,
+            subid,
+        )
+
+        output_dir = rename_output_dir(
+            output_dir,
+            final_dir,
+        )
+
+        ctx.output_dir = output_dir
+        logger.info(
+            "Final output directory: %s",
+            output_dir,
+        )
+
+        outputs = write_run_outputs(
             output_dir,
             completed_tests,
             run_date=run_date,
-            datasetid=None,
+            datasetid=datasetid,
             subid=subid,
             battery_code=battery_code,
             environment=environment_config.name,
             cnb_host=environment_config.base_host,
             browser=browser,
+            browser_name=runtime_env["browser_name"],
+            browser_version=runtime_env["browser_version"],
+            os_name=runtime_env["os_name"],
+            os_version=runtime_env["os_version"],
             headless=headless,
             run_scope=run_scope,
             selected_test_tokens=selected_test_tokens,
+            dataset_lookup_error=dataset_lookup_error,
+        )
+
+        logger.info(
+            "Completed tests written to %s",
+            outputs["completed_path"],
+        )
+        logger.info(
+            "Run metadata written to %s",
+            outputs["metadata_path"],
+        )
+        logger.info(
+            "Summary CSV written to %s",
+            outputs["summary_path"],
+        )
+
+        spllt_test_codes = {
+            "spllt-a-1.00-ff",
+            "spllt-b-1.00-ff",
+            "spllt-c-1.00-ff",
+            "spllt-d-1.00-ff",
+        }
+
+        spllt_records = [
+            record
+            for record in completed_tests
+            if str(
+                record.get("test_name") or ""
+            ).strip().lower()
+            in spllt_test_codes
+        ]
+
+        if spllt_records:
+            logger.info(
+                "Starting SPLLT dataset-specific score scraping "
+                "for %d scenarios...",
+                len(spllt_records),
             )
 
-        logger.info("Battery completed. Waiting 5 seconds before closing test browser...")
-        time.sleep(5)
+            scrape_results = scrape_spllt_records(
+                ctx,
+                spllt_records,
+            )
 
-    except Exception as exc:
-        logger.exception("Battery failed: %s", exc)
+        elif score_scraping_enabled():
+            logger.info(
+                "Starting score scraping for completed tests "
+                "because SCRAPE_RESULTS=1..."
+            )
 
-        if artifacts is not None:
-            try:
-                artifacts.capture_failure(
-                    "battery_runner_failure",
-                    str(exc),
-                    {"error": str(exc)},
-                )
-            except Exception:
-                logger.exception("Could not capture battery runner failure artifact")
+            scrape_results = scrape_completed_tests(
+                ctx,
+                completed_tests,
+            )
 
-        raise
+        else:
+            logger.info(
+                "Score scraping skipped because SCRAPE_RESULTS "
+                "is not enabled."
+            )
 
-    finally:
-        if driver is not None:
-            try:
-                driver.quit()
-                logger.info("Test browser closed.")
-            except Exception:
-                pass
+            scrape_results = [{
+                "test_name": "__score_scraping__",
+                "status": "SKIPPED",
+                "scrape_status": "SKIPPED_BY_CONFIG",
+                "reason": (
+                    "Score scraping is currently disabled. "
+                    "Set SCRAPE_RESULTS=1 to enable it later."
+                ),
+                "datasetid": datasetid,
+            }]
 
-    if ctx is None:
-        raise RuntimeError("Session context was not created; cannot finalize results.")
-
-    logger.info("Looking up dataset ID for output folder name...")
-    datasetid, dataset_lookup_error = lookup_datasetid(
-        subid,
-        logger,
-        get_datasetid_for_subid,
-    )
-
-    final_dir = final_output_dir_for(output_root, datasetid, run_date, subid)
-    output_dir = rename_output_dir(output_dir, final_dir)
-
-    ctx.output_dir = output_dir
-    logger.info("Final output directory: %s", output_dir)
-
-    outputs = write_run_outputs(
-        output_dir,
-        completed_tests,
-        run_date=run_date,
-        datasetid=datasetid,
-        subid=subid,
-        battery_code=battery_code,
-        environment=environment_config.name,
-        cnb_host=environment_config.base_host,
-        browser=browser,
-        browser_name=runtime_env["browser_name"],
-        browser_version=runtime_env["browser_version"],
-        os_name=runtime_env["os_name"],
-        os_version=runtime_env["os_version"],
-        headless=headless,
-        run_scope=run_scope,
-        selected_test_tokens=selected_test_tokens,
-        dataset_lookup_error=dataset_lookup_error,
-    )
-
-    logger.info("Completed tests written to %s", outputs["completed_path"])
-    logger.info("Run metadata written to %s", outputs["metadata_path"])
-    logger.info("Summary CSV written to %s", outputs["summary_path"])
-
-    spllt_test_codes = {
-        "spllt-a-1.00-ff",
-        "spllt-b-1.00-ff",
-        "spllt-c-1.00-ff",
-        "spllt-d-1.00-ff",
-    }
-
-    spllt_records = [
-        record
-        for record in completed_tests
-        if str(record.get("test_name") or "").strip().lower()
-        in spllt_test_codes
-    ]
-
-    if spllt_records:
-        logger.info(
-            "Starting SPLLT dataset-specific score scraping for %d scenarios...",
-            len(spllt_records),
-        )
-
-        scrape_results = scrape_spllt_records(
-            ctx,
-            spllt_records,
-        )
-
-    elif score_scraping_enabled():
-        logger.info(
-            "Starting score scraping for completed tests "
-            "because SCRAPE_RESULTS=1..."
-        )
-
-        scrape_results = scrape_completed_tests(
-            ctx,
-            completed_tests,
-        )
-
-    else:
-        logger.info(
-            "Score scraping skipped because SCRAPE_RESULTS "
-            "is not enabled."
-        )
-
-        scrape_results = [{
-            "test_name": "__score_scraping__",
-            "status": "SKIPPED",
-            "scrape_status": "SKIPPED_BY_CONFIG",
-            "reason": (
-                "Score scraping is currently disabled. "
-                "Set SCRAPE_RESULTS=1 to enable it later."
+        scrape_path = output_dir / "scrape_results.json"
+        scrape_path.write_text(
+            json.dumps(
+                scrape_results,
+                indent=2,
+                ensure_ascii=False,
             ),
+            encoding="utf-8",
+        )
+
+        logger.info(
+            "Scrape results written to %s",
+            scrape_path,
+        )
+        logger.info(
+            "%s browser run complete.",
+            browser.capitalize(),
+        )
+
+        return {
+            "browser": browser,
+            "status": "PASS",
+            "error": None,
             "datasetid": datasetid,
-        }]
+            "output_dir": str(output_dir),
+        }
 
-    scrape_path = output_dir / "scrape_results.json"
-    scrape_path.write_text(
-        json.dumps(
-            scrape_results,
-            indent=2,
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
+    browser_results = []
 
-    logger.info("Scrape results written to %s", scrape_path)
-    logger.info("All done.")
+    for browser_index, browser in enumerate(
+        browsers,
+        start=1,
+    ):
+        if len(browsers) > 1:
+            print()
+            print(
+                f"Browser run {browser_index}/{len(browsers)}: "
+                f"{browser.capitalize()}"
+            )
+
+        result = run_single_browser(browser)
+        browser_results.append(result)
+
+        if result["status"] == "FAIL":
+            print()
+            print(
+                f"{browser.capitalize()} run failed: "
+                f"{result['error']}"
+            )
+
+            # A single-browser selection preserves the previous behavior:
+            # a fatal runner exception should fail the invocation.
+            if len(browsers) == 1:
+                raise RuntimeError(
+                    f"{browser.capitalize()} run failed: "
+                    f"{result['error']}"
+                )
+
+            # In all-browser mode, continue to the next browser.
+            print(
+                "Continuing to the next browser because "
+                "option 4 was selected."
+            )
+
+    if len(browsers) > 1:
+        print()
+        print("=" * 70)
+        print("ALL-BROWSER RUN SUMMARY")
+        print("=" * 70)
+
+        for result in browser_results:
+            browser_label = result["browser"].capitalize()
+            status = result["status"]
+            output_dir = result.get("output_dir") or ""
+
+            print(
+                f"{browser_label}: {status}"
+                + (
+                    f" | {output_dir}"
+                    if output_dir
+                    else ""
+                )
+            )
+
+            if result.get("error"):
+                print(
+                    f"  Error: {result['error']}"
+                )
+
+        failed = [
+            result
+            for result in browser_results
+            if result["status"] == "FAIL"
+        ]
+
+        if failed:
+            print()
+            print(
+                f"Completed all 3 browser attempts with "
+                f"{len(failed)} browser-level failure(s)."
+            )
+        else:
+            print()
+            print(
+                "Completed Chrome, Firefox, and Edge successfully."
+            )
 
 
 if __name__ == "__main__":
