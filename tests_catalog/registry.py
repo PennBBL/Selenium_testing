@@ -111,6 +111,6 @@ DEFAULT_STRATEGIES = {
     "spllt-c-1.00-ff": "suite",
     "spllt-d-1.00-ff": "suite",
     "pvt-b-5.00-ff": "first5_false_starts",
-    "pvt-b-6.00-ff": "first5_false_starts",
-    "pvt-b-btn-6.00-ff": "under_350",
+    "pvt-b-6.00-ff": "mid_355_500",
+    "pvt-b-btn-6.00-ff": "mid_355_500",
 }
