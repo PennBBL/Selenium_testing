@@ -66,6 +66,12 @@ class PVT6Plugin:
     TRIAL_CLICK_TARGET_SELECTOR = ".pvt-trial-btn-container"
     FEEDBACK_SELECTOR = ".pvt-feedback"
 
+    CONTINUE_SELECTORS = (
+        "button.continue-button",
+        "button.button.continue-button",
+        "button.button.continue-button.center--horizontal",
+    )
+
     PHASE_EVENT_TIMEOUT_SECONDS = 45.0
     POLL_INTERVAL_SECONDS = 0.005
     END_CONTAINER_ABSENCE_SECONDS = 1.0
@@ -324,6 +330,167 @@ class PVT6Plugin:
             return ""
 
     # ------------------------------------------------------------------
+    # Instruction-page navigation
+    # ------------------------------------------------------------------
+
+    def _visible_continue_button(self, ctx):
+        for selector in self.CONTINUE_SELECTORS:
+            try:
+                elements = ctx.driver.find_elements(
+                    By.CSS_SELECTOR,
+                    selector,
+                )
+
+                for element in elements:
+                    try:
+                        if element.is_displayed() and element.is_enabled():
+                            return element
+                    except Exception:
+                        continue
+
+            except Exception:
+                continue
+
+        return False
+
+    def _instruction_debug_snapshot(self, ctx) -> dict:
+        body_text = self._body_text(ctx).strip()
+
+        buttons = []
+        try:
+            for element in ctx.driver.find_elements(By.TAG_NAME, "button"):
+                try:
+                    if element.is_displayed():
+                        text = (element.text or "").strip()
+                        classes = (
+                            element.get_attribute("class") or ""
+                        ).strip()
+
+                        buttons.append({
+                            "text": text,
+                            "class": classes,
+                        })
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        stimulus_visible = False
+
+        try:
+            state = self._state_snapshot(ctx)
+            stimulus_visible = bool(state.get("boxVisible"))
+        except Exception:
+            pass
+
+        return {
+            "body": body_text[:800],
+            "visible_buttons": buttons[:20],
+            "stimulus_visible": stimulus_visible,
+            "url": getattr(ctx.driver, "current_url", ""),
+        }
+
+    def _wait_for_instruction_change(
+        self,
+        ctx,
+        *,
+        previous_body: str,
+        label: str,
+        timeout: float = 8.0,
+    ) -> None:
+        """
+        Wait for an instruction action to have an observable effect.
+
+        Do not depend on any particular sentence because the PVT instruction
+        copy has changed across versions. A transition is considered complete
+        when:
+          - the practice/test stimulus container becomes visible, or
+          - the visible body text changes.
+        """
+        previous = (previous_body or "").strip()
+        deadline = time.perf_counter() + timeout
+
+        while time.perf_counter() < deadline:
+            try:
+                state = self._state_snapshot(ctx)
+                if state.get("boxVisible"):
+                    return
+            except Exception:
+                pass
+
+            current = self._body_text(ctx).strip()
+
+            if current and current != previous:
+                return
+
+            time.sleep(0.05)
+
+        snapshot = self._instruction_debug_snapshot(ctx)
+
+        raise TimeoutException(
+            f"PVT instruction page did not change after {label}. "
+            f"snapshot={snapshot!r}"
+        )
+
+    def _advance_regular_instruction(self, ctx, label: str) -> None:
+        """
+        Advance one instruction screen for pvt-b-6.00-ff.
+
+        Prefer an actual Continue button if the current deployment presents
+        one. Otherwise use the historical SPACE behavior.
+        """
+        previous_body = self._body_text(ctx)
+
+        if self._visible_continue_button(ctx):
+            self._click_continue(
+                ctx,
+                label=f"PVT {label}",
+                timeout=5,
+            )
+        else:
+            self._press_space(
+                ctx,
+                label,
+            )
+
+        self._wait_for_instruction_change(
+            ctx,
+            previous_body=previous_body,
+            label=label,
+            timeout=8,
+        )
+
+    def _advance_button_instruction(self, ctx, label: str) -> None:
+        """
+        Advance one instruction screen for pvt-b-btn-6.00-ff.
+
+        This variant should use visible Continue controls and never use SPACE.
+        """
+        previous_body = self._body_text(ctx)
+
+        if not self._visible_continue_button(ctx):
+            snapshot = self._instruction_debug_snapshot(ctx)
+
+            raise RuntimeError(
+                "PVT button variant expected a visible Continue button "
+                f"for {label}, but none was found. "
+                f"snapshot={snapshot!r}"
+            )
+
+        self._click_continue(
+            ctx,
+            label=f"PVT BTN {label}",
+            timeout=5,
+        )
+
+        self._wait_for_instruction_change(
+            ctx,
+            previous_body=previous_body,
+            label=label,
+            timeout=8,
+        )
+
+    # ------------------------------------------------------------------
     # PVT page-state detection
     # ------------------------------------------------------------------
 
@@ -386,6 +553,14 @@ const batteryComplete = bodyUpper.includes(
     "YOU HAVE COMPLETED THE TEST BATTERY"
 );
 
+const continueButton = Array.from(
+    document.querySelectorAll(
+        'button.continue-button, ' +
+        'button.button.continue-button, ' +
+        'button.button.continue-button.center--horizontal'
+    )
+).find(visible) || null;
+
 const postTest = Boolean(
     batteryComplete ||
     document.querySelector("p.test-name") ||
@@ -401,6 +576,7 @@ return {
     boxText: boxText,
     numericValue: numericValue,
     digitClass: digitClass,
+    continueVisible: Boolean(continueButton),
     postTest: postTest,
     url: window.location.href
 };
@@ -513,6 +689,18 @@ return {
             if last_state.get("beginTest"):
                 return {
                     "type": "begin_test",
+                    "waitElapsedMs": (
+                        time.perf_counter() - started
+                    ) * 1000.0,
+                }
+
+            if (
+                phase == "practice"
+                and last_state.get("continueVisible")
+                and not last_state.get("boxVisible")
+            ):
+                return {
+                    "type": "main_instruction",
                     "waitElapsedMs": (
                         time.perf_counter() - started
                     ) * 1000.0,
@@ -841,91 +1029,102 @@ return {
 
     def _enter_practice_space_variant(self, ctx) -> None:
         """
-        Existing pvt-b-6.00-ff flow.
+        Enter practice for pvt-b-6.00-ff without relying on instruction text.
 
-        run_battery has already clicked the outer landing-page Continue.
+        There may be an internal welcome/intro Continue page before the
+        SPACE-driven instructions. That page existed in earlier deployments
+        and is handled first when present.
 
-            general instructions -> SPACE
-            practice instructions -> SPACE
-            BEGIN PRACTICE -> Continue button
+        After that, advance instruction pages until the PVT stimulus container
+        mounts. On each page:
+          - click Continue if a visible Continue button exists;
+          - otherwise send SPACE.
         """
+        max_steps = 6
 
-        self._wait_for_text(
-            ctx,
-            "watch the red rectangle",
-            timeout=20,
-        )
+        for step in range(1, max_steps + 1):
+            try:
+                state = self._state_snapshot(ctx)
+                if state.get("boxVisible"):
+                    ctx.logger.info(
+                        "PVT regular variant reached practice after "
+                        "%d instruction action(s).",
+                        step - 1,
+                    )
+                    return
+            except Exception:
+                pass
 
-        self._press_space(
-            ctx,
-            "instructions1 -> instructions2",
-        )
+            snapshot = self._instruction_debug_snapshot(ctx)
 
-        self._wait_for_text(
-            ctx,
-            "We will first do a practice trial",
-            timeout=20,
-        )
+            ctx.logger.info(
+                "PVT regular instruction step %d/%d: "
+                "body=%r buttons=%s",
+                step,
+                max_steps,
+                snapshot.get("body"),
+                snapshot.get("visible_buttons"),
+            )
 
-        self._press_space(
-            ctx,
-            "instructions2 -> begin practice",
-        )
+            self._advance_regular_instruction(
+                ctx,
+                label=f"instruction step {step}",
+            )
 
-        self._wait_for_text(
-            ctx,
-            "BEGIN PRACTICE",
-            timeout=20,
-        )
+        snapshot = self._instruction_debug_snapshot(ctx)
 
-        self._click_continue(
-            ctx,
-            label="PVT 6.00 BEGIN PRACTICE",
-            timeout=10,
+        raise RuntimeError(
+            "PVT regular variant did not reach practice after "
+            f"{max_steps} instruction actions. "
+            f"snapshot={snapshot!r}"
         )
 
     def _enter_practice_click_variant(self, ctx) -> None:
         """
-        pvt-b-btn-6.00-ff flow.
+        Enter practice for pvt-b-btn-6.00-ff without relying on instruction
+        copy.
 
-        The user confirmed all internal instructional pages use a
-        "Click here to continue" button. Do not send SPACE on this variant.
+        Every internal instruction page for this variant should expose a
+        Continue button. Keep clicking visible Continue controls until the PVT
+        stimulus container mounts.
         """
+        max_steps = 6
 
-        self._wait_for_text(
-            ctx,
-            "watch the red rectangle",
-            timeout=20,
-        )
+        for step in range(1, max_steps + 1):
+            try:
+                state = self._state_snapshot(ctx)
+                if state.get("boxVisible"):
+                    ctx.logger.info(
+                        "PVT button variant reached practice after "
+                        "%d Continue click(s).",
+                        step - 1,
+                    )
+                    return
+            except Exception:
+                pass
 
-        self._click_continue(
-            ctx,
-            label="PVT BTN instructions1 -> instructions2",
-            timeout=10,
-        )
+            snapshot = self._instruction_debug_snapshot(ctx)
 
-        self._wait_for_text(
-            ctx,
-            "We will first do a practice trial",
-            timeout=20,
-        )
+            ctx.logger.info(
+                "PVT button instruction step %d/%d: "
+                "body=%r buttons=%s",
+                step,
+                max_steps,
+                snapshot.get("body"),
+                snapshot.get("visible_buttons"),
+            )
 
-        self._click_continue(
-            ctx,
-            label="PVT BTN instructions2 -> begin practice",
-            timeout=10,
-        )
+            self._advance_button_instruction(
+                ctx,
+                label=f"instruction step {step}",
+            )
 
-        self._wait_for_text(
-            ctx,
-            "BEGIN PRACTICE",
-            timeout=20,
-        )
+        snapshot = self._instruction_debug_snapshot(ctx)
 
-        self._click_continue(
-            ctx,
-            label="PVT BTN BEGIN PRACTICE",
-            timeout=10,
+        raise RuntimeError(
+            "PVT button variant did not reach practice after "
+            f"{max_steps} Continue clicks. "
+            f"snapshot={snapshot!r}"
         )
 
     def _enter_practice(self, ctx) -> None:
@@ -945,7 +1144,7 @@ return {
         self._wait_for_stimulus_container(
             ctx,
             "practice start",
-            timeout=15,
+            timeout=20,
         )
 
     # ------------------------------------------------------------------
@@ -969,10 +1168,15 @@ return {
                 allow_task_end=False,
             )
 
-            if event.get("type") == "begin_test":
+            if event.get("type") in {
+                "begin_test",
+                "main_instruction",
+            }:
                 ctx.logger.info(
-                    "PVT practice complete after %d observed trials.",
+                    "PVT practice complete after %d observed trials; "
+                    "transition=%s.",
                     trial_index,
+                    event.get("type"),
                 )
                 return observations
 
@@ -1007,11 +1211,15 @@ return {
                 allow_task_end=False,
             )
 
-            if event.get("type") == "begin_test":
+            if event.get("type") in {
+                "begin_test",
+                "main_instruction",
+            }:
                 raise RuntimeError(
                     "PVT practice ended before the abandonment scenario "
                     f"could reach {target_responses} responses; "
-                    f"observed {trial_index}."
+                    f"observed {trial_index}; "
+                    f"transition={event.get('type')}."
                 )
 
             if event.get("type") != "counter":
@@ -1048,35 +1256,73 @@ return {
 
     def _enter_main_test(self, ctx) -> None:
         """
-        Both PVT 6 variants reach a BEGIN TEST instruction page.
+        Advance from the post-practice instruction page into the scored block.
 
-        - regular pvt-b-6.00-ff: Continue button
-        - pvt-b-btn-6.00-ff: Continue button
-
-        Therefore no trial response helper is used here.
+        Do not require the literal text "BEGIN TEST". Current PVT versions can
+        change instruction copy while retaining the same Continue control.
         """
+        deadline = time.perf_counter() + 15.0
 
-        self._wait_for_text(
-            ctx,
-            "BEGIN TEST",
-            timeout=10,
-        )
+        while time.perf_counter() < deadline:
+            try:
+                state = self._state_snapshot(ctx)
 
-        ctx.logger.info(
-            "PVT BEGIN TEST screen detected for %s.",
-            self._active_test_code(ctx),
-        )
+                # If the main stimulus container has already mounted, no
+                # additional instruction action is needed.
+                if state.get("boxVisible"):
+                    ctx.logger.info(
+                        "PVT main-test stimulus container is already visible."
+                    )
+                    return
 
-        self._click_continue(
-            ctx,
-            label="PVT 6.00 BEGIN TEST",
-            timeout=10,
-        )
+            except Exception:
+                state = {}
 
-        self._wait_for_stimulus_container(
-            ctx,
-            "main test start",
-            timeout=15,
+            if self._visible_continue_button(ctx):
+                snapshot = self._instruction_debug_snapshot(ctx)
+
+                ctx.logger.info(
+                    "PVT advancing post-practice instruction page: "
+                    "body=%r buttons=%s",
+                    snapshot.get("body"),
+                    snapshot.get("visible_buttons"),
+                )
+
+                previous_body = self._body_text(ctx)
+
+                self._click_continue(
+                    ctx,
+                    label="PVT post-practice -> main test",
+                    timeout=5,
+                )
+
+                try:
+                    self._wait_for_instruction_change(
+                        ctx,
+                        previous_body=previous_body,
+                        label="post-practice -> main test",
+                        timeout=8,
+                    )
+                except TimeoutException:
+                    # The next explicit stimulus wait gives the definitive
+                    # result and produces a richer failure message.
+                    pass
+
+                self._wait_for_stimulus_container(
+                    ctx,
+                    "main test start",
+                    timeout=20,
+                )
+                return
+
+            time.sleep(0.1)
+
+        snapshot = self._instruction_debug_snapshot(ctx)
+
+        raise TimeoutException(
+            "PVT did not expose a post-practice Continue button or "
+            "main-test stimulus within 15s. "
+            f"snapshot={snapshot!r}"
         )
 
     # ------------------------------------------------------------------
