@@ -63,10 +63,10 @@ class PVT6Plugin:
     PRACTICE_RT_MS = 300
 
     STIMULUS_CONTAINER_SELECTOR = ".pvt-stimulus"
-    TRIAL_CLICK_TARGET_SELECTOR = ".pvt-trial"
+    TRIAL_CLICK_TARGET_SELECTOR = ".pvt-trial-btn-container"
     FEEDBACK_SELECTOR = ".pvt-feedback"
 
-    PHASE_EVENT_TIMEOUT_SECONDS = 35.0
+    PHASE_EVENT_TIMEOUT_SECONDS = 45.0
     POLL_INTERVAL_SECONDS = 0.005
     END_CONTAINER_ABSENCE_SECONDS = 1.0
 
@@ -164,12 +164,16 @@ class PVT6Plugin:
 
     def _click_trial(self, ctx, label: str) -> None:
         """
-        Click the response target used by pvt-b-btn-6.00-ff.
+        Send a real press/release sequence to the button-PVT wrapper.
 
-        Confirmed active-trial HTML:
-            <div class="pvt-trial" style="cursor: pointer; ...">
+        The current PVTTrialsBtn component records the response in
+        onMouseDownListener() and uses onMouseUpListener() only to release the
+        pressed/stuck-button state. Therefore a JavaScript element.click()
+        fallback is NOT sufficient: a synthetic "click" event alone does not
+        execute the React mousedown/mouseup handlers.
 
-        Click the whole trial area rather than the changing numeric span.
+        The wrapper class pvt-trial-btn-container is always present in the
+        current component, even if trial_style changes.
         """
         ctx.logger.info("PVT clicking trial area: %s", label)
 
@@ -181,13 +185,59 @@ class PVT6Plugin:
             lambda d: self._visible_click_target(d)
         )
 
+        # Selenium's native element click normally produces the required
+        # mouse-down / mouse-up sequence and is the preferred path.
         try:
             trial.click()
-        except Exception:
-            ctx.driver.execute_script(
-                "arguments[0].click();",
-                trial,
+            return
+        except Exception as native_exc:
+            ctx.logger.warning(
+                "PVT native trial click failed for %s; "
+                "trying ActionChains: %s",
+                label,
+                native_exc,
             )
+
+        # Second choice: explicit WebDriver mouse action sequence.
+        try:
+            ActionChains(ctx.driver).move_to_element(trial).click().perform()
+            return
+        except Exception as actions_exc:
+            ctx.logger.warning(
+                "PVT ActionChains trial click failed for %s; "
+                "dispatching mousedown/mouseup events: %s",
+                label,
+                actions_exc,
+            )
+
+        # Last-resort fallback. Do NOT use arguments[0].click(): the React
+        # component has no onClick response handler. Explicitly dispatch both
+        # event types that the component listens for.
+        ctx.driver.execute_script(
+            """
+            const el = arguments[0];
+
+            const down = new MouseEvent('mousedown', {
+                bubbles: true,
+                cancelable: true,
+                view: window,
+                button: 0,
+                buttons: 1
+            });
+
+            const up = new MouseEvent('mouseup', {
+                bubbles: true,
+                cancelable: true,
+                view: window,
+                button: 0,
+                buttons: 0
+            });
+
+            el.dispatchEvent(down);
+            el.dispatchEvent(up);
+            """,
+            trial,
+        )
 
     def _visible_click_target(self, driver):
         elements = driver.find_elements(
@@ -197,8 +247,19 @@ class PVT6Plugin:
 
         for element in elements:
             try:
-                if element.is_displayed() and element.is_enabled():
+                rect = element.rect or {}
+                has_size = (
+                    float(rect.get("width", 0) or 0) > 0
+                    and float(rect.get("height", 0) or 0) > 0
+                )
+
+                if (
+                    has_size
+                    and element.is_displayed()
+                    and element.is_enabled()
+                ):
                     return element
+
             except Exception:
                 continue
 
@@ -310,6 +371,17 @@ if (box) {
 const numericMatch = boxText.match(/\d+/);
 const numericValue = numericMatch ? numericMatch[0] : null;
 
+const digitElement = box ? box.querySelector(
+    '.two-digit-stimulus, ' +
+    '.three-digit-stimulus, ' +
+    '.four-digit-stimulus, ' +
+    '.five-digit-stimulus'
+) : null;
+
+const digitClass = digitElement
+    ? (digitElement.className || null)
+    : null;
+
 const batteryComplete = bodyUpper.includes(
     "YOU HAVE COMPLETED THE TEST BATTERY"
 );
@@ -328,6 +400,7 @@ return {
     boxVisible: boxVisible,
     boxText: boxText,
     numericValue: numericValue,
+    digitClass: digitClass,
     postTest: postTest,
     url: window.location.href
 };
@@ -452,6 +525,7 @@ return {
                     "type": "counter",
                     "value": str(numeric_value),
                     "box_text": last_state.get("boxText", ""),
+                    "digit_class": last_state.get("digitClass"),
                     "waitElapsedMs": (
                         time.perf_counter() - started
                     ) * 1000.0,
@@ -693,9 +767,11 @@ return {
 
         ctx.logger.info(
             "PVT counter detected for %s: value=%s "
-            "box_text=%r wait_elapsed_ms=%.1f response_mode=%s",
+            "digit_class=%r box_text=%r wait_elapsed_ms=%.1f "
+            "response_mode=%s",
             trial_label,
             event.get("value"),
+            event.get("digit_class"),
             event.get("box_text", ""),
             float(event.get("waitElapsedMs") or 0.0),
             response_mode,
@@ -750,6 +826,7 @@ return {
             "webdriver_send_ms": round(send_duration_ms, 2),
             "response_mode": response_mode,
             "counter_value_at_detection": event.get("value"),
+            "digit_class_at_detection": event.get("digit_class"),
             "box_text_at_detection": event.get("box_text", ""),
             "wait_elapsed_ms": round(
                 float(event.get("waitElapsedMs") or 0.0),
